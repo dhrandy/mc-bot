@@ -75,6 +75,8 @@ test('eat only a selected safe food, disconnect and reconnect without an unwante
     assert.equal(bot.equipped, 'bread')
     assert.equal((await post('/api/disconnect')).status, 200)
     assert.equal(bot.quitReason, 'Disconnected via control API')
+    assert.equal(service.bot, null)
+    assert.equal(service.status().position, null)
     assert.equal(service.stopping, true)
     assert.equal((await post('/api/jump', { durationMs: 100 })).status, 503)
     service.createBot = () => {
