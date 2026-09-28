@@ -1,0 +1,7 @@
+.git
+.github
+node_modules
+.env
+.env.example
+test
+README.md
