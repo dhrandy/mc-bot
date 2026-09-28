@@ -1,8 +1,8 @@
 # mc-bot
 
-**EXPERIMENTAL BETA** - a small Minecraft Java bot controlled through an HTTP JSON API. It has not yet been verified against a live server. Expect rough edges; do not give it valuable inventory or unrestricted access to a production world.
+**EXPERIMENTAL BETA** - a small Minecraft Java bot controlled through an HTTP JSON API. It has unit-tested controls, but water exits and server-specific physics still need live verification. Expect rough edges; do not give it valuable inventory or unrestricted access to a production world.
 
-The bot signs into an **online-mode** server using a Microsoft account that owns Minecraft Java Edition. It can report position/status, read recent chat, send chat, follow a visible player, walk near coordinates, look at coordinates, and stop moving. There is no autonomous AI model in the container: any authorized client can call the API.
+The bot signs into an **online-mode** server using a Microsoft account that owns Minecraft Java Edition. It can report position/status and inventory, read and send chat, follow a visible player, walk near coordinates, look at coordinates, jump, swim upward, eat selected food, stop, and disconnect. There is no autonomous AI model in the container: any authorized client can call the API.
 
 ## Start with Docker Compose
 
@@ -16,6 +16,15 @@ MC_ACCOUNT_ID=bot-account-alias
 API_PORT=42883
 API_TOKEN=replace-with-a-random-secret-at-least-32-characters
 ```
+
+| Variable | Purpose |
+| --- | --- |
+| `MC_HOST` | Reachable Minecraft Java server host |
+| `MC_PORT` | Server port, usually 25565 |
+| `MC_VERSION` | Server version; blank auto-detects |
+| `MC_ACCOUNT_ID` | Stable Microsoft login cache identifier |
+| `API_PORT` | Host port for the private control API |
+| `API_TOKEN` | Random bearer secret, at least 32 characters |
 
 `MC_ACCOUNT_ID` is a stable cache identifier for the account, not its password or in-game name. Use the same identifier after restart so the cached login is reused. `MC_VERSION` may be blank to auto-detect. Generate a fresh, long random API token, for example `openssl rand -hex 32`; never commit the real `.env`. The `bot-auth` volume contains Microsoft authentication tokens; keep it private and back it up or sign in again if it is lost.
 
@@ -53,13 +62,18 @@ All routes require `Authorization: Bearer <API_TOKEN>`, including reads. JSON re
 
 | Method | Path | Body | Result |
 | --- | --- | --- | --- |
-| GET | `/api/status` | none | connection state, username, position, health, food, last error |
+| GET | `/api/status` | none | connection state, username, position, health, food, inventory slots, navigation progress, last error |
 | GET | `/api/chat` | none | recent chat |
 | POST | `/api/chat` | `{"message":"Hello"}` | send public chat |
 | POST | `/api/follow` | `{"player":"PlayerName"}` | follow a nearby visible player |
-| POST | `/api/goto` | `{"x":0,"y":64,"z":0}` | walk near coordinates, reply when done |
+| POST | `/api/goto` | `{"x":0,"y":64,"z":0}` | start walking near coordinates, return `202` immediately with an action ID; poll status for arrived/failed |
 | POST | `/api/look` | `{"x":0,"y":65,"z":0}` | look at coordinates |
-| POST | `/api/stop` | empty | stop navigation and controls |
+| POST | `/api/jump` | `{"durationMs":500}` | jump for 100-30000 ms on land; cancels navigation |
+| POST | `/api/swim` | `{"durationMs":3000,"forward":true}` | swim upward for 100-30000 ms, optionally moving forward in the direction the bot faces; cancels navigation |
+| POST | `/api/eat` | `{"slot":36}` | eat a selected safe food item from the inventory; no automatic food selection |
+| POST | `/api/stop` | empty | stop navigation and release movement controls |
+| POST | `/api/disconnect` | empty | quit the server and disable automatic reconnect until `/api/reconnect` or container restart |
+| POST | `/api/reconnect` | empty | reconnect after an API disconnect |
 
 Example:
 
@@ -69,7 +83,7 @@ curl -X POST -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application
   -d '{"player":"PlayerName"}' http://127.0.0.1:42883/api/follow
 ```
 
-The port is bound to loopback in the default Compose. To call it from a different device or cloud-based assistant, first set up a private network route. The bot will retry failed connections with backoff up to 60 seconds. API status can show `connecting` or `offline` while it retries. A `goto` may fail if it cannot pathfind to the destination. `/api/stop` stops a following goal but cannot instantly undo a chat or movement already sent.
+The port is bound to loopback in the default Compose. To call it from a different device or cloud-based assistant, first set up a private network route. The bot will retry failed connections with backoff up to 60 seconds. API status can show `connecting` or `offline` while it retries. A `goto` may fail after its `202` response if it cannot pathfind to the destination. Poll `GET /api/status` for `navigation.state` (`moving`, `arrived`, `failed`, or `following`) and the action ID. A newer navigation command or stop cancels the earlier goal. A failed connection records the reason in logs and `lastError` before retrying; an intentional disconnect does not retry. Pathfinder gives water a higher cost, disables sprinting, digging, towers, and unlimited drops into water. It may still choose water when there is no land path. Jump and swim are distinct calls: in Mineflayer the swim-up input uses the same jump control state, with optional forward movement. Face shore with `/api/look`, then swim forward if needed. Both controls are time-limited; `/api/stop` releases them early. They are not a guaranteed fix for every waterline or Minecraft physics bug. `/api/stop` stops a following goal but cannot instantly undo a chat or movement already sent.
 
 ### Paste-ready AI connection prompt
 
@@ -77,8 +91,12 @@ The port is bound to loopback in the default Compose. To call it from a differen
 
 ## Development
 
-`npm ci && npm test` runs tests without joining a server. These tests cover basic API auth/validation and are not a substitute for live server testing. To run without Docker, set the variables above in your own environment and run `npm start` with `AUTH_CACHE_DIR` pointing to a private directory. License: MIT. No account or server address belongs in this repository.
+`npm ci && npm test` runs tests without joining a server. These tests cover API auth, validation, movement setup and control behavior without a server; a live water-exit test remains necessary. To run without Docker, set the variables above in your own environment and run `npm start` with `AUTH_CACHE_DIR` pointing to a private directory. License: MIT. No account or server address belongs in this repository.
 
 ### Known issues
 
-This is an experimental build, not yet tested on a live Java server. At the time of the initial build, `npm audit` reports six moderate advisories in transitive Mineflayer/Microsoft-auth dependencies and no high or critical advisories. Monitor upstream updates and avoid public API exposure.
+This remains an experimental build. Earlier live play showed the bot getting trapped at a waterline; the new swim control has not yet been tested on that server. At the time of the initial build, `npm audit` reports six moderate advisories in transitive Mineflayer/Microsoft-auth dependencies and no high or critical advisories. Monitor upstream updates and avoid public API exposure.
+
+### Deferred controls
+
+There is no automatic combat, mining, placing, or container access. Combat needs target/ownership safeguards, while building and digging can alter the world. Automatic eating also waits for a clear policy on which food to use; `/api/eat` selects a slot explicitly. No free sprint toggle is exposed because disabling sprinting avoids a known pathfinder waterline problem. No general-purpose keypress endpoint is exposed; jump and swim are bounded instead.
