@@ -64,12 +64,27 @@ function server (service, token) {
       }
       if (req.method === 'POST' && path === '/api/goto') {
         const coords = coordinates(await body(req))
-        return respond(res, 200, await service.goto(...coords))
+        return respond(res, 202, service.goto(...coords))
       }
       if (req.method === 'POST' && path === '/api/look') {
         const coords = coordinates(await body(req))
         return respond(res, 200, await service.look(...coords))
       }
+      if (req.method === 'POST' && (path === '/api/jump' || path === '/api/swim')) {
+        const { durationMs, forward = false } = await body(req)
+        const mode = path === '/api/swim' ? 'swim' : 'jump'
+        if (!Number.isInteger(durationMs) || durationMs < 100 || durationMs > 30000 || typeof forward !== 'boolean' || (mode === 'jump' && forward)) {
+          throw Object.assign(new Error('Expected durationMs 100-30000; forward boolean only for swim'), { status: 400 })
+        }
+        return respond(res, 200, service.move(mode, durationMs, forward))
+      }
+      if (req.method === 'POST' && path === '/api/eat') {
+        const { slot } = await body(req)
+        if (!Number.isInteger(slot) || slot < 0 || slot > 100) throw Object.assign(new Error('Expected inventory slot 0-100'), { status: 400 })
+        return respond(res, 200, await service.eat(slot))
+      }
+      if (req.method === 'POST' && path === '/api/disconnect') return respond(res, 200, service.disconnect())
+      if (req.method === 'POST' && path === '/api/reconnect') return respond(res, 200, service.reconnect())
       if (req.method === 'POST' && path === '/api/stop') return respond(res, 200, service.stop())
       respond(res, 404, { error: 'Not found' })
     } catch (error) {
