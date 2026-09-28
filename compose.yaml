@@ -1,0 +1,21 @@
+services:
+  mc-bot:
+    build: .
+    container_name: mc-bot
+    restart: unless-stopped
+    environment:
+      MC_HOST: ${MC_HOST}
+      MC_PORT: ${MC_PORT}
+      MC_VERSION: ${MC_VERSION}
+      MC_ACCOUNT_ID: ${MC_ACCOUNT_ID}
+      API_TOKEN: ${API_TOKEN}
+      AUTO_DEFEND: ${AUTO_DEFEND}
+      AUTO_EAT: ${AUTO_EAT}
+      API_PORT: "42883"
+      AUTH_CACHE_DIR: /data/auth
+    ports:
+      - "127.0.0.1:${API_PORT}:42883"
+    volumes:
+      - bot-auth:/data/auth
+volumes:
+  bot-auth:
