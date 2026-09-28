@@ -42,6 +42,7 @@ class BotService {
       movements.canDig = false
       movements.allow1by1towers = false
       movements.infiniteLiquidDropdownDistance = false
+      movements.exclusionAreasPlace.push(() => 100)
       bot.pathfinder.setMovements(movements)
       console.log('Bot spawned; control API is ready')
     })
