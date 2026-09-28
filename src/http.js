@@ -44,6 +44,18 @@ function coordinates (input) {
   return [x, y, z]
 }
 
+function blockCoordinates (input) {
+  const [x, y, z] = coordinates(input)
+  if (![x, y, z].every(Number.isInteger)) throw Object.assign(new Error('Expected integer block coordinates'), { status: 400 })
+  return { x, y, z }
+}
+
+function materialName (value, label = 'material') {
+  stringField(value, label, 64)
+  if (!/^[a-z0-9_]+$/.test(value)) throw Object.assign(new Error(`Invalid ${label}`), { status: 400 })
+  return value
+}
+
 function server (service, token) {
   return http.createServer(async (req, res) => {
     if (!authorized(req, token)) return respond(res, 401, { error: 'Unauthorized' })
@@ -95,6 +107,29 @@ function server (service, token) {
         const { slot } = await body(req)
         if (!Number.isInteger(slot) || slot < 0 || slot > 100) throw Object.assign(new Error('Expected inventory slot 0-100'), { status: 400 })
         return respond(res, 200, await service.eat(slot))
+      }
+      if (req.method === 'POST' && path === '/api/craft') {
+        const { item, count = 1 } = await body(req)
+        materialName(item, 'item')
+        if (!Number.isInteger(count) || count < 1 || count > 16) throw Object.assign(new Error('Expected count 1-16'), { status: 400 })
+        return respond(res, 200, await service.craft(item, count))
+      }
+      if (req.method === 'POST' && path === '/api/place-bed') return respond(res, 200, await service.placeBed(blockCoordinates(await body(req))))
+      if (req.method === 'POST' && path === '/api/sleep') return respond(res, 200, await service.sleep())
+      if (req.method === 'POST' && path === '/api/wake') return respond(res, 200, await service.wake())
+      if (req.method === 'POST' && ['/api/till', '/api/plant', '/api/harvest', '/api/gather'].includes(path)) {
+        const input = await body(req)
+        const coords = blockCoordinates(input)
+        if (path === '/api/harvest') {
+          if (input.replant != null && typeof input.replant !== 'boolean') throw Object.assign(new Error('Expected boolean replant'), { status: 400 })
+          return respond(res, 200, await service.harvest(coords, input.replant === true))
+        }
+        return respond(res, 200, await service[path.slice(5)](coords))
+      }
+      if (req.method === 'POST' && path === '/api/shelter') {
+        const input = await body(req)
+        materialName(input.material)
+        return respond(res, 200, await service.shelter(input.material, blockCoordinates(input)))
       }
       if (req.method === 'POST' && path === '/api/disconnect') return respond(res, 200, service.disconnect())
       if (req.method === 'POST' && path === '/api/reconnect') return respond(res, 200, service.reconnect())

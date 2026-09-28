@@ -3,6 +3,7 @@ const { pathfinder, goals, Movements } = require('mineflayer-pathfinder')
 const { DANGEROUS, MELEE, distance, mobName, strategy, defend, selectThreat } = require('./survival')
 const { SAFE_FOODS, chooseFood } = require('./food')
 const Vec3 = require('vec3')
+const work = require('./work')
 
 class BotService {
   constructor (config, createBot = mineflayer.createBot) {
@@ -317,6 +318,16 @@ class BotService {
       this.building = false
     }
   }
+
+  craft (item, count) { return work.craft(this, item, count) }
+  sleep () { return work.sleep(this) }
+  placeBed (coords) { return work.placeBed(this, coords) }
+  wake () { return work.sleep(this, true) }
+  till (coords) { return work.till(this, coords) }
+  plant (coords) { return work.plant(this, coords) }
+  harvest (coords, replant) { return work.harvest(this, coords, replant) }
+  gather (coords) { return work.gather(this, coords) }
+  shelter (material, origin) { return work.shelter(this, material, origin) }
 
   disconnect () {
     if (this.stopping) return { disconnected: true }
