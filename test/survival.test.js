@@ -58,6 +58,7 @@ test('attack allows one nearby hostile hit, never players, endermen, creepers or
 test('threat tactics retreat from creeper and ranged mobs; melee uses a cooldown', () => {
   const { bot, actions } = fixture()
   const zombie = bot.entities[1]
+  delete bot.entities[3]
   assert.equal(selectThreat(bot), zombie)
   assert.equal(defend(bot, zombie, 0, 1000).action, 'attack')
   assert.equal(defend(bot, zombie, 1000, 1100).action, 'hold')
@@ -68,7 +69,7 @@ test('threat tactics retreat from creeper and ranged mobs; melee uses a cooldown
   assert.equal(defend(bot, skeleton).action, 'retreat')
   const drowned = { name: 'drowned', position: { x: 2, y: 64, z: 0 } }
   assert.equal(defend(bot, drowned).action, 'retreat')
-  assert.equal(defend(bot, bot.entities[3]).action, 'unsupported')
+  assert.equal(defend(bot, { name: 'enderman', position: { x: 1, y: 64, z: 0 } }).action, 'retreat')
   assert.equal(actions.filter(([kind]) => kind === 'attack').length, 1)
 })
 
@@ -89,6 +90,7 @@ test('placing requires valid exact coordinates, solid inventory material and adj
 
 test('damage arms opt-in defense for eight seconds and disconnect clears its timer', async () => {
   const { bot, service, actions } = fixture()
+  delete bot.entities[3]
   bot.loadPlugin = () => {}
   bot.registry = require('minecraft-data')('1.21.4')
   bot.pathfinder.setMovements = () => {}
