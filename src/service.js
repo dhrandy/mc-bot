@@ -1,6 +1,7 @@
 const mineflayer = require('mineflayer')
 const { pathfinder, goals, Movements } = require('mineflayer-pathfinder')
-const { DANGEROUS, distance, mobName, defend, selectThreat } = require('./survival')
+const { DANGEROUS, MELEE, distance, mobName, strategy, defend, selectThreat } = require('./survival')
+const { SAFE_FOODS, chooseFood } = require('./food')
 const Vec3 = require('vec3')
 
 class BotService {
@@ -22,6 +23,9 @@ class BotService {
     this.defenseArmedUntil = 0
     this.building = false
     this.defense = null
+    this.foodTimer = null
+    this.eating = false
+    this.lastEatError = null
   }
 
   connect () {
@@ -52,11 +56,14 @@ class BotService {
       movements.exclusionAreasPlace.push(() => 100)
       bot.pathfinder.setMovements(movements)
       if (this.config.autoDefend) this.startDefense(bot)
+      if (this.config.autoEat) this.startAutoEat(bot)
       console.log('Bot spawned; control API is ready')
     })
     let previousHealth = bot.health ?? null
     bot.on('health', () => {
-      if (previousHealth !== null && bot.health < previousHealth) this.defenseArmedUntil = Date.now() + 8000
+      if (this.bot !== bot || this.state !== 'online') return
+      if (this.config.autoEat) this.autoEat(bot).catch(error => { this.lastEatError = String(error.message || error).slice(0, 160) })
+      if (this.config.autoDefend && previousHealth !== null && bot.health < previousHealth) this.defenseArmedUntil = Date.now() + 8000
       previousHealth = bot.health
     })
     bot.on('messagestr', (message, position, json, sender) => {
@@ -75,6 +82,7 @@ class BotService {
       if (this.bot !== bot || this.stopping) return
       this.clearControlTimer()
       this.clearDefense()
+      this.clearAutoEat()
       this.state = 'offline'
       this.lastError = this.lastError || `Connection ended: ${String(reason).slice(0, 200)}`
       this.navigation = null
@@ -96,6 +104,9 @@ class BotService {
       lastError: this.lastError,
       navigation: this.navigation,
       autoDefend: Boolean(this.config.autoDefend),
+      autoEat: Boolean(this.config.autoEat),
+      eating: this.eating,
+      lastEatError: this.lastEatError,
       defense: this.defense,
       inventory: this.state === 'online' ? (b.inventory?.items() || []).map(item => ({ slot: item.slot, name: item.name, count: item.count })) : [],
       nearbyHostiles: this.state === 'online' ? Object.values(b.entities || {}).filter(entity => entity?.position && DANGEROUS.has(mobName(entity)) && distance(b.entity.position, entity.position) <= 10).map(entity => ({ id: entity.id, name: mobName(entity), distance: Math.round(distance(b.entity.position, entity.position) * 10) / 10 })) : []
@@ -177,14 +188,52 @@ class BotService {
     const item = b.inventory.items().find(item => item.slot === slot)
     if (!item) throw Object.assign(new Error('No item in that slot'), { status: 404 })
     const food = b.registry.foodsByName?.[item.name]
-    const unsafe = new Set(['rotten_flesh', 'spider_eye', 'pufferfish', 'poisonous_potato', 'chorus_fruit'])
-    if (!food || unsafe.has(item.name)) throw Object.assign(new Error('Item is not a supported safe food'), { status: 400 })
+    if (!food || !SAFE_FOODS.has(item.name)) throw Object.assign(new Error('Item is not a supported safe food'), { status: 400 })
     if (b.food >= 20) throw Object.assign(new Error('Food bar is full'), { status: 409 })
-    await b.equip(item, 'hand')
-    await b.consume()
+    if (this.eating) throw Object.assign(new Error('Already eating'), { status: 409 })
+    await this.consumeFood(b, item)
     return { eaten: item.name, food: b.food }
   }
 
+
+
+  async consumeFood (bot, item) {
+    if (this.eating) return false
+    this.eating = true
+    const held = bot.heldItem
+    try {
+      await bot.equip(item, 'hand')
+      await bot.consume()
+      this.lastEatError = null
+      return true
+    } finally {
+      if (this.bot === bot && held && bot.inventory.items().some(candidate => candidate.slot === held.slot && candidate.name === held.name)) {
+        try { await bot.equip(held, 'hand') } catch (error) { this.lastEatError = `Could not restore held item: ${String(error.message || error).slice(0, 100)}` }
+      }
+      this.eating = false
+    }
+  }
+
+  async autoEat (bot) {
+    if (this.bot !== bot || this.state !== 'online' || this.eating || this.building || this.defense?.action === 'attack' || this.defense?.action === 'hit-and-retreat' || bot.food == null || bot.food > 14 || bot.food >= 20) return false
+    const item = chooseFood(bot)
+    if (!item) { this.lastEatError = 'No safe food in inventory'; return false }
+    return this.consumeFood(bot, item)
+  }
+
+  startAutoEat (bot) {
+    this.clearAutoEat()
+    this.autoEat(bot).catch(error => { this.lastEatError = String(error.message || error).slice(0, 160) })
+    this.foodTimer = setInterval(() => {
+      this.autoEat(bot).catch(error => { this.lastEatError = String(error.message || error).slice(0, 160) })
+    }, 10000)
+    this.foodTimer.unref?.()
+  }
+
+  clearAutoEat () {
+    if (this.foodTimer) clearInterval(this.foodTimer)
+    this.foodTimer = null
+  }
 
   clearDefense () {
     if (this.defenseTimer) clearInterval(this.defenseTimer)
@@ -199,20 +248,20 @@ class BotService {
       if (this.bot !== bot || this.state !== 'online' || this.building) return
       const entity = selectThreat(bot)
       if (!entity) {
-        if (this.defense?.action === 'retreat' && !this.navigation) bot.pathfinder.setGoal(null)
+        if (['retreat', 'hit-and-retreat'].includes(this.defense?.action) && !this.navigation) bot.pathfinder.setGoal(null)
         this.defense = null
         return
       }
       if (mobName(entity) !== 'creeper' && Date.now() > this.defenseArmedUntil) {
-        if (this.defense?.action === 'retreat' && !this.navigation) bot.pathfinder.setGoal(null)
+        if (['retreat', 'hit-and-retreat'].includes(this.defense?.action) && !this.navigation) bot.pathfinder.setGoal(null)
         this.defense = null
         return
       }
       try {
-        if (this.defense?.action === 'retreat' && this.defense.entityId === entity.id) return
+        if (['retreat', 'hit-and-retreat'].includes(this.defense?.action) && this.defense.entityId === entity.id && Date.now() - Date.parse(this.defense.at) < 1400) return
         const result = defend(bot, entity, this.defenseLastHitAt)
-        if (result.action === 'attack') this.defenseLastHitAt = Date.now()
-        if (result.action === 'retreat') {
+        if (result.action === 'attack' || result.action === 'hit-and-retreat') this.defenseLastHitAt = Date.now()
+        if (result.action === 'retreat' || result.action === 'hit-and-retreat') {
           this.actionId++
           this.navigation = null
         }
@@ -227,12 +276,12 @@ class BotService {
   attack (id) {
     const bot = this.ready()
     const candidates = Object.values(bot.entities || {}).filter(entity =>
-      entity?.position && DANGEROUS.has(mobName(entity)) && mobName(entity) !== 'creeper' &&
+      entity?.position && MELEE.has(mobName(entity)) &&
       distance(bot.entity.position, entity.position) <= 3)
     const target = id == null
       ? candidates.sort((a, b) => distance(bot.entity.position, a.position) - distance(bot.entity.position, b.position))[0]
       : candidates.find(entity => entity.id === id)
-    if (!target) throw Object.assign(new Error('No allowed hostile in melee reach; creepers, players, endermen and unknown mobs are excluded'), { status: 404 })
+    if (!target) throw Object.assign(new Error('No allowed melee hostile in reach; risky, neutral, player and unknown targets are excluded'), { status: 404 })
     bot.attack(target)
     return { attacked: { id: target.id, name: mobName(target) }, singleHit: true }
   }
@@ -277,6 +326,7 @@ class BotService {
     this.actionId++
     this.clearControlTimer()
     this.clearDefense()
+    this.clearAutoEat()
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = null
     this.bot?.pathfinder?.setGoal(null)
@@ -297,6 +347,7 @@ class BotService {
     this.stopping = true
     this.clearControlTimer()
     this.clearDefense()
+    this.clearAutoEat()
     this.state = 'stopped'
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.bot?.quit('Shutting down')
