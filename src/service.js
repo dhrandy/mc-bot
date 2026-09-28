@@ -179,6 +179,7 @@ class BotService {
     this.bot?.pathfinder?.setGoal(null)
     this.bot?.clearControlStates()
     this.bot?.quit('Disconnected via control API')
+    this.bot = null
     return { disconnected: true }
   }
 
