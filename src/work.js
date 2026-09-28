@@ -145,20 +145,44 @@ async function harvest (service, coords, replant = false) {
   })
 }
 
+// Mining is an explicit, single-block request. The server registry decides what a
+// block drops and which tool can harvest it; breaking it alone does not guarantee a drop.
+const unsafeToGather = /^(?:air|cave_air|void_air|water|flowing_water|lava|flowing_lava|fire|soul_fire|bedrock|barrier|.*(?:portal|command_block|structure_block|spawner|chest|barrel|shulker_box|furnace|hopper|dispenser|dropper|beacon|_bed|_door|trapdoor|button|lever|pressure_plate|_sign|_rail|piston|tnt))$/
+const treeLog = /^(?:oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/
+const adjacent = [new Vec3(0, 1, 0), new Vec3(0, -1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)]
+
+function gatheringTool (bot, block) {
+  const allowed = bot.registry.blocksByName?.[block.name]?.harvestTools
+  if (allowed && Object.keys(allowed).length) {
+    const tool = bot.inventory.items().find(item => allowed[item.type])
+    if (!tool) fail(`${block.name} needs a suitable tool to yield its drop`)
+    return tool
+  }
+  const material = bot.registry.blocksByName?.[block.name]?.material || ''
+  const suffix = material.includes('shovel') ? '_shovel' : material.includes('axe') ? '_axe' : material.includes('pickaxe') ? '_pickaxe' : material.includes('hoe') ? '_hoe' : null
+  return suffix ? bot.inventory.items().find(item => item.name.endsWith(suffix)) || null : null
+}
+
 async function gather (service, coords) {
   return exclusive(service, async bot => {
     const block = target(bot, coords)
-    const grass = ['short_grass', 'tall_grass'].includes(block.name)
-    const log = /^(?:oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/.test(block.name)
-    if (!grass && !log) fail('Only wild grass or tree logs can be gathered; built structures are excluded')
-    if (log) {
+    const definition = bot.registry.blocksByName?.[block.name]
+    if (!definition?.diggable || definition.hardness < 0 || unsafeToGather.test(block.name)) fail('This block is not available for safe gathering')
+    if (treeLog.test(block.name)) {
       let leaves = false
       for (let dx = -3; dx <= 3; dx++) for (let dy = 0; dy <= 5; dy++) for (let dz = -3; dz <= 3; dz++) {
         if (bot.blockAt(block.position.offset(dx, dy, dz))?.name?.endsWith('_leaves')) leaves = true
       }
       if (!leaves) fail('Log has no nearby leaves; it may be player-built, so it was not broken')
     }
+    const feet = bot.entity.position.floored()
+    if (block.position.x === feet.x && block.position.z === feet.z && block.position.y < feet.y) fail('Will not dig beneath the bot')
+    if (Object.values(bot.entities || {}).some(entity => entity.type === 'player' && entity.position && gap(entity.position, block.position) < 2)) fail('Player is too close to the target block')
+    if (adjacent.some(offset => /^(?:lava|flowing_lava)$/.test(bot.blockAt(block.position.plus(offset))?.name || ''))) fail('Lava borders the target block')
     if (!bot.canDigBlock(block)) fail('Block cannot be safely dug from here')
+    const tool = gatheringTool(bot, block)
+    if (tool) await bot.equip(tool, 'hand')
+    else await bot.unequip('hand') // An unsuitable held tool may be destroyed without yielding drops.
     await bot.dig(block)
     const dropped = Object.values(bot.entities || {}).filter(entity => entity.name === 'item' && entity.position && gap(entity.position, block.position) < 3)
     let pickup = 'no nearby dropped item observed; approach the drops manually'
@@ -169,8 +193,7 @@ async function gather (service, coords) {
         pickup = 'walked to a nearby dropped item; check inventory to confirm collection'
       }
     }
-    return { gathered: block.name, position: coords, pickup }
-
+    return { gathered: block.name, position: coords, tool: tool?.name || 'hand', pickup }
   })
 }
 

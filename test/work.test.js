@@ -23,6 +23,7 @@ function fixture () {
     recipesAll: (id, meta, table) => Recipe.find(id, meta).filter(r => !r.requiresTable || table),
     craft: async (recipe, n, table) => calls.push(['craft', recipe.result.id, n, Boolean(table)]),
     equip: async item => { bot.heldItemName = item.name; calls.push(['equip', item.name]) },
+    unequip: async () => { bot.heldItemName = null; calls.push(['unequip']) },
     activateBlock: async block => calls.push(['activate', block.name]),
     placeBlock: async (block, face) => { const pos = block.position.plus(face); calls.push(['place', pos.toString()]); blocks.set(pos.toString(), { name: bot.heldItemName || 'oak_planks', position: pos, boundingBox: 'block' }) },
     dig: async block => calls.push(['dig', block.name]),
@@ -99,14 +100,14 @@ test('till needs water and hoe, plant needs seeds, harvest only mature wheat', a
   assert.equal(calls.filter(c => c[0] === 'dig').length, 1)
 })
 
-test('gather permits wild grass or leafy logs only; shelter preflights materials and empty footprint', async () => {
+test('gather protects trees and unsafe digs; shelter preflights materials and empty footprint', async () => {
   const { service, put, inventory, calls } = fixture()
   await api(service, async post => {
     put(2, 64, 0, 'oak_log')
     assert.match((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.error, /nearby leaves/)
     put(2, 66, 0, 'oak_leaves')
     assert.equal((await post('/api/gather', { x: 2, y: 64, z: 0 })).status, 200)
-    assert.equal((await post('/api/gather', { x: 0, y: 63, z: 0 })).status, 409)
+    assert.match((await post('/api/gather', { x: 0, y: 63, z: 0 })).data.error, /beneath the bot/)
     inventory[1].count = 3
     assert.match((await post('/api/shelter', { x: 0, y: 64, z: 0, material: 'oak_planks' })).data.error, /Missing oak_planks/)
     inventory[1].count = 64
@@ -134,4 +135,38 @@ test('placing a bed requires two empty blocks over solid support and inventory b
     assert.equal((await post('/api/place-bed', foot)).status, 200)
   })
   assert.ok(calls.some(call => call[0] === 'place'))
+})
+
+test('gather bare-handed dirt, sand, gravel and wood, and select registry-approved tool tiers', async () => {
+  const { service, put, inventory, calls } = fixture()
+  inventory.push({ name: 'iron_sword', type: data.itemsByName.iron_sword.id, count: 1 })
+  await api(service, async post => {
+    for (const name of ['dirt', 'sand', 'gravel']) {
+      put(2, 64, 0, name)
+      const result = await post('/api/gather', { x: 2, y: 64, z: 0 })
+      assert.equal(result.status, 200, JSON.stringify(result.data))
+      assert.equal(result.data.tool, 'hand')
+    }
+    put(2, 64, 0, 'birch_log')
+    put(2, 66, 0, 'birch_leaves')
+    assert.equal((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.tool, 'hand')
+    put(2, 64, 0, 'stone')
+    assert.match((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.error, /suitable tool/)
+    inventory.push({ name: 'wooden_pickaxe', type: data.itemsByName.wooden_pickaxe.id, count: 1 })
+    assert.equal((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.tool, 'wooden_pickaxe')
+    put(2, 64, 0, 'iron_ore')
+    assert.match((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.error, /suitable tool/)
+    inventory.push({ name: 'stone_pickaxe', type: data.itemsByName.stone_pickaxe.id, count: 1 })
+    assert.equal((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.tool, 'stone_pickaxe')
+    put(2, 64, 0, 'diamond_ore')
+    assert.match((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.error, /suitable tool/)
+    inventory.push({ name: 'iron_pickaxe', type: data.itemsByName.iron_pickaxe.id, count: 1 })
+    assert.equal((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.tool, 'iron_pickaxe')
+    put(2, 64, 0, 'chest')
+    assert.match((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.error, /not available/)
+    put(2, 64, 0, 'dirt')
+    put(3, 64, 0, 'lava')
+    assert.match((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.error, /Lava/)
+  })
+  assert.ok(calls.some(call => call[0] === 'unequip'))
 })
