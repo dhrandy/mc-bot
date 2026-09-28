@@ -1,0 +1,23 @@
+{
+  "name": "mc-bot",
+  "version": "0.1.0",
+  "description": "Experimental headless Minecraft Java bot with a small HTTP control API",
+  "main": "src/index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "mineflayer": "^4.39.0",
+    "mineflayer-pathfinder": "^2.4.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
