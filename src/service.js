@@ -1,5 +1,7 @@
 const mineflayer = require('mineflayer')
 const { pathfinder, goals, Movements } = require('mineflayer-pathfinder')
+const { DANGEROUS, distance, mobName, defend, selectThreat } = require('./survival')
+const Vec3 = require('vec3')
 
 class BotService {
   constructor (config, createBot = mineflayer.createBot) {
@@ -15,6 +17,11 @@ class BotService {
     this.actionId = 0
     this.controlTimer = null
     this.navigation = null
+    this.defenseTimer = null
+    this.defenseLastHitAt = 0
+    this.defenseArmedUntil = 0
+    this.building = false
+    this.defense = null
   }
 
   connect () {
@@ -44,7 +51,13 @@ class BotService {
       movements.infiniteLiquidDropdownDistance = false
       movements.exclusionAreasPlace.push(() => 100)
       bot.pathfinder.setMovements(movements)
+      if (this.config.autoDefend) this.startDefense(bot)
       console.log('Bot spawned; control API is ready')
+    })
+    let previousHealth = bot.health ?? null
+    bot.on('health', () => {
+      if (previousHealth !== null && bot.health < previousHealth) this.defenseArmedUntil = Date.now() + 8000
+      previousHealth = bot.health
     })
     bot.on('messagestr', (message, position, json, sender) => {
       this.messages.push({ at: new Date().toISOString(), message: String(message).slice(0, 512), position, sender: sender || null })
@@ -61,6 +74,7 @@ class BotService {
       console.warn('Bot connection ended:', String(reason).slice(0, 200))
       if (this.bot !== bot || this.stopping) return
       this.clearControlTimer()
+      this.clearDefense()
       this.state = 'offline'
       this.lastError = this.lastError || `Connection ended: ${String(reason).slice(0, 200)}`
       this.navigation = null
@@ -81,7 +95,10 @@ class BotService {
       food: b && this.state === 'online' ? b.food : null,
       lastError: this.lastError,
       navigation: this.navigation,
-      inventory: this.state === 'online' ? (b.inventory?.items() || []).map(item => ({ slot: item.slot, name: item.name, count: item.count })) : []
+      autoDefend: Boolean(this.config.autoDefend),
+      defense: this.defense,
+      inventory: this.state === 'online' ? (b.inventory?.items() || []).map(item => ({ slot: item.slot, name: item.name, count: item.count })) : [],
+      nearbyHostiles: this.state === 'online' ? Object.values(b.entities || {}).filter(entity => entity?.position && DANGEROUS.has(mobName(entity)) && distance(b.entity.position, entity.position) <= 10).map(entity => ({ id: entity.id, name: mobName(entity), distance: Math.round(distance(b.entity.position, entity.position) * 10) / 10 })) : []
     }
   }
 
@@ -124,12 +141,13 @@ class BotService {
     this.clearControlTimer()
     b.pathfinder.setGoal(null)
     b.clearControlStates()
+    this.defense = null
+    this.defenseArmedUntil = 0
     return { stopped: true }
   }
 
   async look (x, y, z) {
     const b = this.ready()
-    const Vec3 = require('vec3')
     await b.lookAt(new Vec3(x, y, z))
     return { lookingAt: { x, y, z } }
   }
@@ -167,6 +185,90 @@ class BotService {
     return { eaten: item.name, food: b.food }
   }
 
+
+  clearDefense () {
+    if (this.defenseTimer) clearInterval(this.defenseTimer)
+    this.defenseTimer = null
+    this.defense = null
+    this.defenseArmedUntil = 0
+  }
+
+  startDefense (bot) {
+    this.clearDefense()
+    this.defenseTimer = setInterval(() => {
+      if (this.bot !== bot || this.state !== 'online' || this.building) return
+      const entity = selectThreat(bot)
+      if (!entity) {
+        if (this.defense?.action === 'retreat' && !this.navigation) bot.pathfinder.setGoal(null)
+        this.defense = null
+        return
+      }
+      if (mobName(entity) !== 'creeper' && Date.now() > this.defenseArmedUntil) {
+        if (this.defense?.action === 'retreat' && !this.navigation) bot.pathfinder.setGoal(null)
+        this.defense = null
+        return
+      }
+      try {
+        if (this.defense?.action === 'retreat' && this.defense.entityId === entity.id) return
+        const result = defend(bot, entity, this.defenseLastHitAt)
+        if (result.action === 'attack') this.defenseLastHitAt = Date.now()
+        if (result.action === 'retreat') {
+          this.actionId++
+          this.navigation = null
+        }
+        this.defense = { ...result, entityId: entity.id, at: new Date().toISOString() }
+      } catch (error) {
+        this.defense = { action: 'failed', error: String(error.message || error).slice(0, 160) }
+      }
+    }, 700)
+    this.defenseTimer.unref?.()
+  }
+
+  attack (id) {
+    const bot = this.ready()
+    const candidates = Object.values(bot.entities || {}).filter(entity =>
+      entity?.position && DANGEROUS.has(mobName(entity)) && mobName(entity) !== 'creeper' &&
+      distance(bot.entity.position, entity.position) <= 3)
+    const target = id == null
+      ? candidates.sort((a, b) => distance(bot.entity.position, a.position) - distance(bot.entity.position, b.position))[0]
+      : candidates.find(entity => entity.id === id)
+    if (!target) throw Object.assign(new Error('No allowed hostile in melee reach; creepers, players, endermen and unknown mobs are excluded'), { status: 404 })
+    bot.attack(target)
+    return { attacked: { id: target.id, name: mobName(target) }, singleHit: true }
+  }
+
+  async place (x, y, z, material) {
+    const bot = this.ready()
+    if (this.building) throw Object.assign(new Error('Placement already in progress'), { status: 409 })
+    const point = new Vec3(x, y, z)
+    if (distance(bot.entity.position, point) < 1.5) throw Object.assign(new Error('Target overlaps the bot'), { status: 409 })
+    if (distance(bot.entity.position, point) > 4.5) throw Object.assign(new Error('Target is out of reach'), { status: 400 })
+    if (Object.values(bot.entities || {}).some(entity => entity?.type === 'player' && entity.position && distance(entity.position, point) < 1.5)) throw Object.assign(new Error('A player is too close to the target block'), { status: 409 })
+    const current = bot.blockAt(point)
+    if (!current || !['air', 'cave_air', 'void_air'].includes(current.name)) throw Object.assign(new Error('Target is not a loaded, empty block'), { status: 409 })
+    const excluded = /(?:tnt|lava|water|bucket|spawn_egg|command_block|bedrock|end_crystal|fire|shulker|chest|barrel|furnace|hopper|dispenser|dropper|door|trapdoor|button|lever|pressure_plate|rail|bed|sign|torch|lantern|slab|stair|fence|wall|pane|carpet|powder|sand|gravel|concrete_powder)$/
+    const block = bot.registry.blocksByName?.[material]
+    if (!block || block.boundingBox !== 'block' || excluded.test(material) || block.name !== material) {
+      throw Object.assign(new Error('Material must be an ordinary full solid block'), { status: 400 })
+    }
+    const item = bot.inventory.items().find(item => item.name === material && item.count > 0)
+    if (!item) throw Object.assign(new Error('Material is not in inventory'), { status: 409 })
+    const faces = [new Vec3(0, -1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1), new Vec3(0, 1, 0)]
+    const face = faces.find(vector => {
+      const support = bot.blockAt(point.minus(vector))
+      return support && support.boundingBox === 'block' && distance(bot.entity.position, support.position) <= 4.5
+    })
+    if (!face) throw Object.assign(new Error('No reachable solid adjacent support block'), { status: 409 })
+    this.building = true
+    try {
+      await bot.equip(item, 'hand')
+      await bot.placeBlock(bot.blockAt(point.minus(face)), face)
+      return { placed: material, x, y, z }
+    } finally {
+      this.building = false
+    }
+  }
+
   disconnect () {
     if (this.stopping) return { disconnected: true }
     this.stopping = true
@@ -174,6 +276,7 @@ class BotService {
     this.navigation = null
     this.actionId++
     this.clearControlTimer()
+    this.clearDefense()
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = null
     this.bot?.pathfinder?.setGoal(null)
@@ -193,6 +296,7 @@ class BotService {
   shutdown () {
     this.stopping = true
     this.clearControlTimer()
+    this.clearDefense()
     this.state = 'stopped'
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.bot?.quit('Shutting down')
