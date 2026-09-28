@@ -78,6 +78,19 @@ function server (service, token) {
         }
         return respond(res, 200, service.move(mode, durationMs, forward))
       }
+      if (req.method === 'POST' && path === '/api/attack') {
+        const { id } = await body(req)
+        if (id != null && (!Number.isInteger(id) || id < 0)) throw Object.assign(new Error('Expected nonnegative entity id'), { status: 400 })
+        return respond(res, 200, service.attack(id))
+      }
+      if (req.method === 'POST' && path === '/api/place') {
+        const { x, y, z, material } = await body(req)
+        coordinates({ x, y, z })
+        if (![x, y, z].every(Number.isInteger)) throw Object.assign(new Error('Expected integer block coordinates'), { status: 400 })
+        stringField(material, 'material', 64)
+        if (!/^[a-z0-9_]+$/.test(material)) throw Object.assign(new Error('Invalid material'), { status: 400 })
+        return respond(res, 200, await service.place(x, y, z, material))
+      }
       if (req.method === 'POST' && path === '/api/eat') {
         const { slot } = await body(req)
         if (!Number.isInteger(slot) || slot < 0 || slot > 100) throw Object.assign(new Error('Expected inventory slot 0-100'), { status: 400 })
