@@ -103,6 +103,7 @@ test('spawn configures safer pathfinder movements and end records the disconnect
   assert.equal(bot.movements.canDig, false)
   assert.equal(bot.movements.allow1by1towers, false)
   assert.equal(bot.movements.infiniteLiquidDropdownDistance, false)
+  assert.equal(bot.movements.exclusionPlace({}), 100)
   assert.ok(bot.movements instanceof Movements)
   bot.emit('end', 'socketClosed')
   assert.match(service.lastError, /socketClosed/)
