@@ -10,12 +10,23 @@ if (!mcHost || !mcAccountId || !apiToken || apiToken.length < 32 || !Number.isIn
   console.error('Set MC_HOST, MC_ACCOUNT_ID, and a random API_TOKEN of at least 32 characters; ports must be valid')
   process.exit(1)
 }
-if (!['true', 'false', undefined].includes(process.env.AUTO_DEFEND) || !['true', 'false', undefined].includes(process.env.AUTO_EAT)) { console.error('AUTO_DEFEND and AUTO_EAT must be true or false'); process.exit(1) }
-const bot = new BotService({ mcHost, mcPort, mcAccountId, mcVersion: process.env.MC_VERSION || undefined, cacheDir: process.env.AUTH_CACHE_DIR || '/data/auth', autoDefend: process.env.AUTO_DEFEND === 'true', autoEat: process.env.AUTO_EAT === 'true' })
+const flags = ['AUTO_DEFEND', 'AUTO_EAT', 'AUTO_JOIN', 'AUTO_FLEE']
+for (const flag of flags) {
+  if (!['true', 'false', '', undefined].includes(process.env[flag])) {
+    console.error(`${flag} must be true or false`)
+    process.exit(1)
+  }
+}
+const bot = new BotService({ mcHost, mcPort, mcAccountId, mcVersion: process.env.MC_VERSION || undefined, cacheDir: process.env.AUTH_CACHE_DIR || '/data/auth', autoDefend: process.env.AUTO_DEFEND === 'true', autoEat: process.env.AUTO_EAT === 'true', autoFlee: process.env.AUTO_FLEE === 'true' })
 const httpServer = server(bot, apiToken)
 httpServer.listen(apiPort, process.env.API_BIND || '0.0.0.0', () => {
   console.log(`Control API listening on port ${apiPort}`)
-  bot.connect()
+  if (process.env.AUTO_JOIN === 'true') {
+    bot.connect()
+  } else {
+    bot.stayOffline()
+    console.log('AUTO_JOIN is off; the bot stays offline until Join on the panel or POST /api/join')
+  }
 })
 function shutdown () {
   bot.shutdown()

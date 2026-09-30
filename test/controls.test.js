@@ -112,3 +112,22 @@ test('spawn configures safer pathfinder movements and end records the disconnect
   assert.equal(service.state, 'offline')
   service.shutdown()
 })
+
+test('stayOffline keeps the bot off the server until join is requested', async () => {
+  const service = new BotService({ mcHost: 'localhost', mcPort: 25565, mcAccountId: 'test' }, () => {
+    const bot = new EventEmitter()
+    bot.loadPlugin = () => {}
+    bot.quit = () => {}
+    return bot
+  })
+  service.stayOffline()
+  assert.equal(service.state, 'offline')
+  assert.equal(service.stopping, true)
+  assert.throws(() => service.stop(), { status: 503 })
+  service.join()
+  assert.equal(service.state, 'connecting')
+  assert.equal(service.stopping, false)
+  assert.throws(() => service.join(), { status: 409 })
+  assert.throws(() => service.reconnect(), { status: 409 })
+  service.shutdown()
+})

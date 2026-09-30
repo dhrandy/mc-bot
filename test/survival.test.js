@@ -111,3 +111,33 @@ test('damage arms opt-in defense for eight seconds and disconnect clears its tim
   assert.equal(service.defenseTimer, null)
   assert.equal(service.defenseArmedUntil, 0)
 })
+
+test('flee retreats from the nearest creeper inside nine blocks and ignores the rest', () => {
+  const { flee } = require('../src/survival')
+  const { bot, actions } = fixture()
+  assert.deepEqual(flee(bot), { action: 'none' })
+  bot.entities[4] = { id: 4, name: 'creeper', position: { x: 12, y: 64, z: 0 } }
+  assert.deepEqual(flee(bot), { action: 'none' })
+  bot.entities[4].position = { x: 5, y: 64, z: 0 }
+  const result = flee(bot)
+  assert.equal(result.action, 'flee')
+  assert.equal(result.distance, 5)
+  const goal = actions.find(([kind]) => kind === 'goal')
+  assert.ok(goal, 'flee sets a pathfinder goal')
+  assert.ok(goal[1].x < 0, 'the goal moves away from the creeper')
+})
+
+test('auto-flee toggle starts and stops the retreat loop and reports in status', async () => {
+  const { bot, service, actions } = fixture()
+  bot.entities[4] = { id: 4, name: 'creeper', position: { x: 5, y: 64, z: 0 } }
+  assert.equal(service.status().autoFlee, false)
+  service.setAutoFlee(true)
+  assert.equal(service.status().autoFlee, true)
+  assert.ok(service.fleeTimer)
+  await new Promise(resolve => setTimeout(resolve, 800))
+  assert.ok(actions.some(([kind]) => kind === 'goal'), 'auto-flee set an escape goal')
+  assert.equal(service.status().fleeing.mob, 'creeper')
+  service.setAutoFlee(false)
+  assert.equal(service.fleeTimer, null)
+  assert.equal(service.status().fleeing, null)
+})

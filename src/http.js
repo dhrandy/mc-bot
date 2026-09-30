@@ -1,5 +1,7 @@
 const http = require('node:http')
 const { timingSafeEqual } = require('node:crypto')
+const { bad, stringField, coordinates, blockCoordinates, materialName } = require('./validate')
+const { panel } = require('./panel')
 
 function authorized (req, token) {
   const supplied = req.headers.authorization
@@ -26,38 +28,15 @@ async function body (req) {
   let input = ''
   for await (const chunk of req) {
     input += chunk
-    if (input.length > 4096) throw Object.assign(new Error('Request too large'), { status: 413 })
+    if (input.length > 4096) throw bad('Request too large', 413)
   }
-  try { return JSON.parse(input) } catch { throw Object.assign(new Error('Invalid JSON'), { status: 400 }) }
-}
-
-function stringField (value, label, max = 256) {
-  if (typeof value !== 'string' || !value.trim() || value.length > max) throw Object.assign(new Error(`Invalid ${label}`), { status: 400 })
-  return value
-}
-
-function coordinates (input) {
-  const { x, y, z } = input
-  if (![x, y, z].every(n => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) <= 30000000)) {
-    throw Object.assign(new Error('Expected finite x, y, z coordinates'), { status: 400 })
-  }
-  return [x, y, z]
-}
-
-function blockCoordinates (input) {
-  const [x, y, z] = coordinates(input)
-  if (![x, y, z].every(Number.isInteger)) throw Object.assign(new Error('Expected integer block coordinates'), { status: 400 })
-  return { x, y, z }
-}
-
-function materialName (value, label = 'material') {
-  stringField(value, label, 64)
-  if (!/^[a-z0-9_]+$/.test(value)) throw Object.assign(new Error(`Invalid ${label}`), { status: 400 })
-  return value
+  try { return JSON.parse(input) } catch { throw bad('Invalid JSON') }
 }
 
 function server (service, token) {
+  const handlePanel = panel(service, token)
   return http.createServer(async (req, res) => {
+    if (await handlePanel(req, res)) return
     if (!authorized(req, token)) return respond(res, 401, { error: 'Unauthorized' })
     try {
       const path = new URL(req.url, 'http://localhost').pathname
@@ -86,32 +65,32 @@ function server (service, token) {
         const { durationMs, forward = false } = await body(req)
         const mode = path === '/api/swim' ? 'swim' : 'jump'
         if (!Number.isInteger(durationMs) || durationMs < 100 || durationMs > 30000 || typeof forward !== 'boolean' || (mode === 'jump' && forward)) {
-          throw Object.assign(new Error('Expected durationMs 100-30000; forward boolean only for swim'), { status: 400 })
+          throw bad('Expected durationMs 100-30000; forward boolean only for swim')
         }
         return respond(res, 200, service.move(mode, durationMs, forward))
       }
       if (req.method === 'POST' && path === '/api/attack') {
         const { id } = await body(req)
-        if (id != null && (!Number.isInteger(id) || id < 0)) throw Object.assign(new Error('Expected nonnegative entity id'), { status: 400 })
+        if (id != null && (!Number.isInteger(id) || id < 0)) throw bad('Expected nonnegative entity id')
         return respond(res, 200, service.attack(id))
       }
       if (req.method === 'POST' && path === '/api/place') {
         const { x, y, z, material } = await body(req)
         coordinates({ x, y, z })
-        if (![x, y, z].every(Number.isInteger)) throw Object.assign(new Error('Expected integer block coordinates'), { status: 400 })
+        if (![x, y, z].every(Number.isInteger)) throw bad('Expected integer block coordinates')
         stringField(material, 'material', 64)
-        if (!/^[a-z0-9_]+$/.test(material)) throw Object.assign(new Error('Invalid material'), { status: 400 })
+        if (!/^[a-z0-9_]+$/.test(material)) throw bad('Invalid material')
         return respond(res, 200, await service.place(x, y, z, material))
       }
       if (req.method === 'POST' && path === '/api/eat') {
         const { slot } = await body(req)
-        if (!Number.isInteger(slot) || slot < 0 || slot > 100) throw Object.assign(new Error('Expected inventory slot 0-100'), { status: 400 })
+        if (!Number.isInteger(slot) || slot < 0 || slot > 100) throw bad('Expected inventory slot 0-100')
         return respond(res, 200, await service.eat(slot))
       }
       if (req.method === 'POST' && path === '/api/craft') {
         const { item, count = 1 } = await body(req)
         materialName(item, 'item')
-        if (!Number.isInteger(count) || count < 1 || count > 16) throw Object.assign(new Error('Expected count 1-16'), { status: 400 })
+        if (!Number.isInteger(count) || count < 1 || count > 16) throw bad('Expected count 1-16')
         return respond(res, 200, await service.craft(item, count))
       }
       if (req.method === 'POST' && path === '/api/place-bed') return respond(res, 200, await service.placeBed(blockCoordinates(await body(req))))
@@ -121,7 +100,7 @@ function server (service, token) {
         const input = await body(req)
         const coords = blockCoordinates(input)
         if (path === '/api/harvest') {
-          if (input.replant != null && typeof input.replant !== 'boolean') throw Object.assign(new Error('Expected boolean replant'), { status: 400 })
+          if (input.replant != null && typeof input.replant !== 'boolean') throw bad('Expected boolean replant')
           return respond(res, 200, await service.harvest(coords, input.replant === true))
         }
         return respond(res, 200, await service[path.slice(5)](coords))
@@ -131,7 +110,13 @@ function server (service, token) {
         materialName(input.material)
         return respond(res, 200, await service.shelter(input.material, blockCoordinates(input)))
       }
-      if (req.method === 'POST' && path === '/api/disconnect') return respond(res, 200, service.disconnect())
+      if (req.method === 'POST' && path === '/api/auto-flee') {
+        const { enabled } = await body(req)
+        if (typeof enabled !== 'boolean') throw bad('Expected boolean enabled')
+        return respond(res, 200, service.setAutoFlee(enabled))
+      }
+      if (req.method === 'POST' && path === '/api/join') return respond(res, 200, service.join())
+      if (req.method === 'POST' && (path === '/api/quit' || path === '/api/disconnect')) return respond(res, 200, service.disconnect())
       if (req.method === 'POST' && path === '/api/reconnect') return respond(res, 200, service.reconnect())
       if (req.method === 'POST' && path === '/api/stop') return respond(res, 200, service.stop())
       respond(res, 404, { error: 'Not found' })

@@ -11,6 +11,8 @@ services:
       API_TOKEN: ${API_TOKEN}
       AUTO_DEFEND: ${AUTO_DEFEND}
       AUTO_EAT: ${AUTO_EAT}
+      AUTO_JOIN: ${AUTO_JOIN}
+      AUTO_FLEE: ${AUTO_FLEE}
       API_PORT: "42883"
       AUTH_CACHE_DIR: /data/auth
     ports:

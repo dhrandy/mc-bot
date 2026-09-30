@@ -1,0 +1,150 @@
+const { test } = require('node:test')
+const assert = require('node:assert/strict')
+const { server } = require('../src/http')
+
+const token = 'test-token-abcdefghijklmnopqrstuvwxyz'
+
+function stubService () {
+  return {
+    calls: [],
+    status () {
+      return {
+        state: 'offline', username: null, position: null, health: null, food: null,
+        lastError: null, navigation: null, autoDefend: false, autoEat: false,
+        autoFlee: false, fleeing: null, eating: false, lastEatError: null,
+        defense: null, inventory: [], nearbyHostiles: []
+      }
+    },
+    join () { this.calls.push(['join']); return { connecting: true } },
+    disconnect () { this.calls.push(['quit']); return { disconnected: true } },
+    stop () { this.calls.push(['stop']); return { stopped: true } },
+    follow (player) { this.calls.push(['follow', player]); return { following: player } },
+    goto (x, y, z) { this.calls.push(['goto', x, y, z]); return { id: 1, state: 'moving', target: { x, y, z } } },
+    async gather (coords) { this.calls.push(['gather', coords]); return { gathered: 'dirt' } },
+    async place (x, y, z, material) { this.calls.push(['place', x, y, z, material]); return { placed: material } },
+    async shelter (material, coords) { this.calls.push(['shelter', material, coords]); return { placed: 55 } },
+    setAutoFlee (enabled) { this.calls.push(['autoFlee', enabled]); return { autoFlee: enabled } },
+    ready () { throw Object.assign(new Error('Bot is not in the world'), { status: 503 }) }
+  }
+}
+
+async function withPanel (service, fn) {
+  const app = server(service, token)
+  await new Promise(resolve => app.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${app.address().port}`
+  const get = (path, cookie) => fetch(base + path, { headers: cookie ? { cookie } : {}, redirect: 'manual' })
+  const post = (path, fields, cookie) => fetch(base + path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) },
+    body: new URLSearchParams(fields).toString(),
+    redirect: 'manual'
+  })
+  try { await fn({ get, post, base }) } finally { app.close() }
+}
+
+async function signIn (post) {
+  const response = await post('/login', { password: token })
+  assert.equal(response.status, 303)
+  const cookie = response.headers.get('set-cookie').split(';')[0]
+  assert.ok(cookie.startsWith('mcb_session='))
+  return cookie
+}
+
+async function csrfOf (get, cookie) {
+  const page = await (await get('/panel', cookie)).text()
+  return page.match(/name="csrf" value="([0-9a-f]+)"/)[1]
+}
+
+test('panel hides behind the login form and never exposes the API token', async () => {
+  const service = stubService()
+  await withPanel(service, async ({ get, post }) => {
+    const root = await get('/')
+    assert.equal(root.status, 303)
+    assert.equal(root.headers.get('location'), '/login')
+    assert.equal((await get('/panel')).status, 303)
+    const login = await get('/login')
+    assert.equal(login.status, 200)
+    const html = await login.text()
+    assert.match(html, /name="password"/)
+    assert.match(html, /autocomplete="current-password"/)
+    assert.match(html, /noindex, nofollow/)
+    assert.ok(!html.includes(token))
+    assert.equal(login.headers.get('x-robots-tag'), 'noindex, nofollow, noarchive')
+    const wrong = await post('/login', { password: 'nope-nope-nope-nope-nope-nope-nope' })
+    assert.equal(wrong.status, 401)
+    assert.ok(!wrong.headers.get('set-cookie'))
+    const cookie = await signIn(post)
+    const panel = await get('/panel', cookie)
+    assert.equal(panel.status, 200)
+    const body = await panel.text()
+    assert.match(body, /action="\/panel\/join"/)
+    assert.match(body, /action="\/panel\/goto"/)
+    assert.match(body, /action="\/panel\/gather"/)
+    assert.match(body, /action="\/panel\/shelter"/)
+    assert.ok(!body.includes(token), 'panel HTML must not contain the token')
+    const logout = await post('/logout', { csrf: await csrfOf(get, cookie) }, cookie)
+    assert.equal(logout.status, 303)
+    assert.equal((await get('/panel', cookie)).status, 303)
+  })
+})
+
+test('panel actions need the session cookie and CSRF token, then reach the service', async () => {
+  const service = stubService()
+  await withPanel(service, async ({ get, post }) => {
+    const cookie = await signIn(post)
+    const csrf = await csrfOf(get, cookie)
+    assert.equal((await post('/panel/stop', {}, cookie)).status, 403)
+    assert.equal((await post('/panel/stop', { csrf })).status, 303)
+    assert.equal((await post('/panel/stop', { csrf }, cookie)).status, 303)
+    assert.deepEqual(service.calls[0], ['stop'])
+    assert.equal((await post('/panel/join', { csrf }, cookie)).status, 303)
+    assert.equal((await post('/panel/goto', { csrf, x: '10.5', y: '64', z: '-20' }, cookie)).status, 303)
+    assert.equal((await post('/panel/place', { csrf, x: '2', y: '64', z: '1', material: 'stone' }, cookie)).status, 303)
+    assert.equal((await post('/panel/place', { csrf, x: '2.5', y: '64', z: '1', material: 'stone' }, cookie)).status, 303)
+    assert.equal((await post('/panel/auto-flee', { csrf, enabled: 'true' }, cookie)).status, 303)
+    assert.deepEqual(service.calls, [
+      ['stop'], ['join'], ['goto', 10.5, 64, -20], ['place', 2, 64, 1, 'stone'], ['autoFlee', true]
+    ])
+    const page = await (await get('/panel', cookie)).text()
+    assert.match(page, /Auto-flee on: the bot runs from creepers/)
+    assert.doesNotMatch(await (await get('/panel', cookie)).text(), /class="flash/)
+  })
+})
+
+test('panel chat while offline shows the service error instead of crashing', async () => {
+  const service = stubService()
+  await withPanel(service, async ({ get, post }) => {
+    const cookie = await signIn(post)
+    const csrf = await csrfOf(get, cookie)
+    assert.equal((await post('/panel/chat', { csrf, message: 'hello' }, cookie)).status, 303)
+    const page = await (await get('/panel', cookie)).text()
+    assert.match(page, /Bot is not in the world/)
+  })
+})
+
+test('login rate limiting locks out repeated failures', async () => {
+  const service = stubService()
+  await withPanel(service, async ({ post }) => {
+    for (let i = 0; i < 5; i++) {
+      assert.equal((await post('/login', { password: 'wrong-wrong-wrong-wrong-wrong' })).status, 401)
+    }
+    assert.equal((await post('/login', { password: token })).status, 429)
+  })
+})
+
+test('join, quit and auto-flee API routes stay behind the bearer token', async () => {
+  const service = stubService()
+  await withPanel(service, async ({ base }) => {
+    const api = (path, payload, auth = token) => fetch(base + path, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${auth}`, 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    assert.equal((await api('/api/join', {}, 'wrong')).status, 401)
+    assert.equal((await api('/api/join', {})).status, 200)
+    assert.equal((await api('/api/quit', {})).status, 200)
+    assert.deepEqual((await (await api('/api/auto-flee', { enabled: true })).json()), { autoFlee: true })
+    assert.equal((await api('/api/auto-flee', { enabled: 'yes' })).status, 400)
+    assert.deepEqual(service.calls, [['join'], ['quit'], ['autoFlee', true]])
+  })
+})

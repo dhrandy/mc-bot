@@ -1,6 +1,6 @@
 # mc-bot
 
-**EXPERIMENTAL BETA** - a small Minecraft Java bot controlled through an HTTP JSON API. It has unit-tested controls, but water exits, mob defense, food handling, crafting, farming, sleep and building still need live verification. Expect rough edges; do not give it valuable inventory or unrestricted access to a production world.
+**EXPERIMENTAL BETA** - a small Minecraft Java bot controlled through a built-in web control panel and an HTTP JSON API. It has unit-tested controls, but water exits, mob defense, food handling, crafting, farming, sleep and building still need live verification. Expect rough edges; do not give it valuable inventory or unrestricted access to a production world.
 
 The bot signs into an **online-mode** server using a Microsoft account that owns Minecraft Java Edition. It can report position/status and inventory, read and send chat, follow a visible player, walk near coordinates, look at coordinates, jump, swim upward, eat selected food, stop, avoid or defend against known mobs when enabled, attack a nearby low-risk hostile, eat selected inventory food when enabled, place one ordinary solid block at explicit coordinates, craft from inventory, place and sleep in a bed, tend wheat, gather one requested diggable block with harvest-tool checks, build a small shelter, and disconnect. There is no autonomous AI model in the container: any authorized client can call the API.
 
@@ -17,6 +17,8 @@ API_PORT=42883
 API_TOKEN=replace-with-a-random-secret-at-least-32-characters
 AUTO_DEFEND=false
 AUTO_EAT=false
+AUTO_JOIN=false
+AUTO_FLEE=false
 ```
 
 | Variable | Purpose |
@@ -29,6 +31,8 @@ AUTO_EAT=false
 | `API_TOKEN` | Random bearer secret, at least 32 characters |
 | `AUTO_DEFEND` | `false` by default; opt in to bounded mob defense after damage and creeper avoidance |
 | `AUTO_EAT` | `false` by default; opt in to safe food selection from inventory when food is 14 or below |
+| `AUTO_JOIN` | `false` by default; the bot stays offline until Join on the panel or `POST /api/join`. Set `true` to join when the container starts |
+| `AUTO_FLEE` | `false` by default; run from creepers on sight. Can also be toggled on the panel and through `POST /api/auto-flee` |
 
 `MC_ACCOUNT_ID` is a stable cache identifier for the account, not its password or in-game name. Use the same identifier after restart so the cached login is reused. `MC_VERSION` may be blank to auto-detect. Generate a fresh, long random API token, for example `openssl rand -hex 32`; never commit the real `.env`. The `bot-auth` volume contains Microsoft authentication tokens; keep it private and back it up or sign in again if it is lost.
 
@@ -48,6 +52,8 @@ services:
       API_TOKEN: ${API_TOKEN}
       AUTO_DEFEND: ${AUTO_DEFEND}
       AUTO_EAT: ${AUTO_EAT}
+      AUTO_JOIN: ${AUTO_JOIN}
+      AUTO_FLEE: ${AUTO_FLEE}
       API_PORT: "42883"
       AUTH_CACHE_DIR: /data/auth
     ports:
@@ -62,9 +68,17 @@ Run `docker compose up -d --build` then `docker compose logs -f mc-bot`. On firs
 
 For Dockhand, use the same Compose contents but change `build: .` to `build: https://github.com/dhrandy/mc-bot.git#main` if deploying from a remote Git URL. Put the variables in Dockhand's Environment tab and mount a private persistent volume to `/data/auth`. If the service runs on another machine and needs remote API access, explicitly change the host port binding from `127.0.0.1` to a LAN address and firewall it to trusted clients. Do not expose this port to the internet. Use a secure private tunnel for remote control, and keep the bearer token secret. The Minecraft server itself can be elsewhere on your LAN; point `MC_HOST` to its reachable address in your private `.env` only.
 
+## Control panel
+
+The same HTTP server hosts a small web control panel at `/` (the sign-in form lives at `/login`). Sign in with the `API_TOKEN` value as the access code; the panel never shows or stores it in the page, and a signed session cookie (HttpOnly, SameSite=Strict, 12 hours) keeps you signed in. Sessions live in memory, so a container restart signs everyone out. After five failed sign-ins from one address it locks that address out for ten minutes, and every form post checks a per-session CSRF token. All panel routes send no-crawl headers and a robots meta tag.
+
+The panel shows state, player name, health, food, position, nearby hostiles, auto-flee state and the last error, with buttons for Join, Stop and Quit, an auto-flee toggle, and plain HTML forms for chat, follow, go to, gather, place a block and build a shelter. Everything works with scripts disabled; when scripts are allowed, the status refreshes itself every five seconds. The layout is built for a phone screen first and stays centered and readable on desktop.
+
+**Upgrading from 0.6.x:** the bot no longer joins the server when the container starts. Set `AUTO_JOIN=true` (or press Join on the panel after each start) to keep the old behavior. This also means a container restart while you are away no longer drops the bot into the world unattended.
+
 ## API
 
-All routes require `Authorization: Bearer <API_TOKEN>`, including reads. JSON responses have a no-crawl header. Body size is limited to 4 KB; chat is capped at 256 characters and recent chat is kept in memory only (last 100, reads return 50). The API deliberately has no raw server-command endpoint.
+All API routes require `Authorization: Bearer <API_TOKEN>`, including reads. The control panel uses its own sign-in instead. JSON responses have a no-crawl header. Body size is limited to 4 KB; chat is capped at 256 characters and recent chat is kept in memory only (last 100, reads return 50). The API deliberately has no raw server-command endpoint.
 
 | Method | Path | Body | Result |
 | --- | --- | --- | --- |
@@ -88,9 +102,12 @@ All routes require `Authorization: Bearer <API_TOKEN>`, including reads. JSON re
 | POST | `/api/harvest` | `{"x":2,"y":64,"z":0,"replant":false}` | break only wheat at age 7; optional replant uses seeds already in inventory |
 | POST | `/api/gather` | `{"x":2,"y":64,"z":0}` | dig one requested nearby block; hand-dig soft blocks, equip the correct harvest tool for stone/ores, try walking to a visible drop |
 | POST | `/api/shelter` | `{"x":0,"y":64,"z":0,"material":"oak_planks"}` | preflight and build a 5x5, 55-block box with 3x3 interior and 1x2 doorway; x/y/z are interior center at floor height |
+| POST | `/api/join` | empty | join the server when offline; `409` while connected or connecting |
+| POST | `/api/quit` | empty | leave the server and stay offline until `/api/join`; same as `/api/disconnect` |
+| POST | `/api/auto-flee` | `{"enabled":true}` | toggle running from creepers on sight, independent of auto-defend |
 | POST | `/api/stop` | empty | stop navigation and release movement controls |
-| POST | `/api/disconnect` | empty | quit the server and disable automatic reconnect until `/api/reconnect` or container restart |
-| POST | `/api/reconnect` | empty | reconnect after an API disconnect |
+| POST | `/api/disconnect` | empty | alias of `/api/quit`, kept for older clients |
+| POST | `/api/reconnect` | empty | alias of `/api/join`, kept for older clients |
 
 Example:
 
@@ -138,6 +155,10 @@ The table covers known Java Edition threats through 1.21.11, and 26.2 adds a pas
 
 Check `GET /api/status` for `defense` and `nearbyHostiles`. IDs change when mobs despawn or the bot reconnects. These are cautious first-pass tactics, not validated survival strategies against every mob or on every server version. Reference: [Minecraft Wiki combat guide](https://minecraft.wiki/w/Tutorial:Combat), [creeper](https://minecraft.wiki/w/Creeper), [warden](https://minecraft.wiki/w/Warden), [Mounts of Mayhem](https://minecraft.wiki/w/Java_Edition_guides/Mounts_of_Mayhem), [Mineflayer API](https://github.com/PrismarineJS/mineflayer/blob/master/docs/api.md).
 
+### Auto-flee (opt in)
+
+Set `AUTO_FLEE=true`, press the panel toggle, or `POST /api/auto-flee` with `{"enabled":true}` to make the bot run from any creeper that comes within nine blocks, whether or not it has taken damage. It never swings at the creeper; escape is the whole plan. The check runs every 0.7 seconds, pauses while the bot is building, and re-issues the escape path at most every 1.4 seconds while the creeper stays close. Enabling it cancels current navigation when a creeper shows up. `GET /api/status` reports `autoFlee` and the last `fleeing` action. This is separate from `AUTO_DEFEND`, which answers damage with bounded retaliation. The toggle set through the panel or API lasts until the container restarts, when the `.env` value applies again.
+
 ### Food (opt in)
 
 Set `AUTO_EAT=true` and restart to let the bot eat from its own inventory when food is 14 or lower. Off by default. It picks the safe food with the most food points, checks again every ten seconds and on health/food updates, and will not eat when full. It keeps one eating action at a time and tries to restore the held item afterward. `GET /api/status` shows `autoEat`, `eating` and `lastEatError`; no food available is reported there. The `/api/eat` endpoint remains for a chosen slot. Safe choices include bread, cooked meat/fish, baked potato, carrot, fruit/berries, soups and honey. It excludes raw meat, rotten flesh, poisonous potato, pufferfish, spider eye, suspicious stew, chorus fruit, golden apples and unknown foods. This is an explicit allowlist, not an inference that every registry food is safe. Auto-eat does not hunt, harvest, craft or refill inventory; killing passive animals or altering farms needs a separate owner choice. Eating may briefly replace a weapon in hand during a fight. Reference: [Mineflayer consume/equip API](https://github.com/PrismarineJS/mineflayer/blob/master/docs/api.md), [food mechanics](https://minecraft.wiki/w/Food), [auto-eat plugin's food exclusions](https://github.com/linkle69/mineflayer-auto-eat). We use a small built-in policy rather than the plugin so the allowed foods and threshold are explicit.
@@ -162,7 +183,7 @@ All these routes require the same bearer token. Every call is a requested action
 
 ## Development
 
-`npm ci && npm test` runs tests without joining a server. These tests cover API auth, validation, movement, mob-selection, safe-food choice, crafting, sleep, wheat farming, gathering, shelter and block-placement behavior without a server; live world verification remains necessary. To run without Docker, set the variables above in your own environment and run `npm start` with `AUTH_CACHE_DIR` pointing to a private directory. License: MIT. No account or server address belongs in this repository.
+`npm ci && npm test` runs tests without joining a server. These tests cover API auth, validation, movement, mob-selection, safe-food choice, crafting, sleep, wheat farming, gathering, shelter, block-placement and the control panel (sign-in, sessions, CSRF, rate limiting and form actions) without a server; live world verification remains necessary. To run without Docker, set the variables above in your own environment and run `npm start` with `AUTH_CACHE_DIR` pointing to a private directory. License: MIT. No account or server address belongs in this repository.
 
 ### Known issues
 

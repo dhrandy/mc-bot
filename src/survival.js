@@ -60,6 +60,19 @@ function defend (bot, entity, lastHitAt = 0, now = Date.now()) {
   return { action: 'attack', mob: name }
 }
 
+// Run from the closest creeper inside nine blocks; never swings at it.
+function flee (bot) {
+  const creepers = Object.values(bot.entities || {})
+    .filter(entity => entity?.position && mobName(entity) === 'creeper')
+    .map(entity => ({ entity, gap: distance(bot.entity.position, entity.position) }))
+    .filter(({ gap }) => gap <= 9)
+    .sort((a, b) => a.gap - b.gap)
+  if (!creepers.length) return { action: 'none' }
+  const { entity, gap } = creepers[0]
+  if (!retreat(bot, entity, 10)) return { action: 'unsafe', mob: 'creeper' }
+  return { action: 'flee', mob: 'creeper', distance: Math.round(gap * 10) / 10 }
+}
+
 function selectThreat (bot) {
   const entities = Object.values(bot.entities || {})
     .filter(entity => entity?.position && DANGEROUS.has(mobName(entity)))
@@ -72,4 +85,4 @@ function selectThreat (bot) {
   return entities[0]?.entity || null
 }
 
-module.exports = { MELEE, RANGED, HEAVY, NEVER, DANGEROUS, distance, mobName, strategy, defend, selectThreat }
+module.exports = { MELEE, RANGED, HEAVY, NEVER, DANGEROUS, distance, mobName, strategy, defend, selectThreat, flee }

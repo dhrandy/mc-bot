@@ -1,9 +1,14 @@
 const mineflayer = require('mineflayer')
 const { pathfinder, goals, Movements } = require('mineflayer-pathfinder')
-const { DANGEROUS, MELEE, distance, mobName, strategy, defend, selectThreat } = require('./survival')
+const { DANGEROUS, MELEE, distance, mobName, strategy, defend, selectThreat, flee } = require('./survival')
 const { SAFE_FOODS, chooseFood } = require('./food')
 const Vec3 = require('vec3')
 const work = require('./work')
+
+function errorText (error) {
+  if (Array.isArray(error?.errors) && error.errors.length) return errorText(error.errors[0])
+  return String(error?.message || error).slice(0, 300)
+}
 
 class BotService {
   constructor (config, createBot = mineflayer.createBot) {
@@ -27,6 +32,9 @@ class BotService {
     this.foodTimer = null
     this.eating = false
     this.lastEatError = null
+    this.autoFlee = Boolean(config.autoFlee)
+    this.fleeTimer = null
+    this.fleeing = null
   }
 
   connect () {
@@ -58,6 +66,7 @@ class BotService {
       bot.pathfinder.setMovements(movements)
       if (this.config.autoDefend) this.startDefense(bot)
       if (this.config.autoEat) this.startAutoEat(bot)
+      if (this.autoFlee) this.startAutoFlee(bot)
       console.log('Bot spawned; control API is ready')
     })
     let previousHealth = bot.health ?? null
@@ -75,7 +84,7 @@ class BotService {
       this.lastError = `Kicked: ${String(reason).slice(0, 300)}`
     })
     bot.on('error', error => {
-      this.lastError = String(error.message || error).slice(0, 300)
+      this.lastError = errorText(error)
       console.error('Bot error:', this.lastError)
     })
     bot.once('end', reason => {
@@ -84,6 +93,7 @@ class BotService {
       this.clearControlTimer()
       this.clearDefense()
       this.clearAutoEat()
+      this.clearAutoFlee()
       this.state = 'offline'
       this.lastError = this.lastError || `Connection ended: ${String(reason).slice(0, 200)}`
       this.navigation = null
@@ -106,6 +116,8 @@ class BotService {
       navigation: this.navigation,
       autoDefend: Boolean(this.config.autoDefend),
       autoEat: Boolean(this.config.autoEat),
+      autoFlee: this.autoFlee,
+      fleeing: this.fleeing,
       eating: this.eating,
       lastEatError: this.lastEatError,
       defense: this.defense,
@@ -236,6 +248,38 @@ class BotService {
     this.foodTimer = null
   }
 
+  setAutoFlee (enabled) {
+    this.autoFlee = Boolean(enabled)
+    if (this.autoFlee && this.state === 'online' && this.bot) this.startAutoFlee(this.bot)
+    else this.clearAutoFlee()
+    return { autoFlee: this.autoFlee }
+  }
+
+  startAutoFlee (bot) {
+    this.clearAutoFlee()
+    this.fleeTimer = setInterval(() => {
+      if (this.bot !== bot || this.state !== 'online' || this.building) return
+      try {
+        if (this.fleeing?.action === 'flee' && Date.now() - Date.parse(this.fleeing.at) < 1400) return
+        const result = flee(bot)
+        if (result.action === 'flee') {
+          this.actionId++
+          this.navigation = null
+        }
+        this.fleeing = result.action === 'none' ? null : { ...result, at: new Date().toISOString() }
+      } catch (error) {
+        this.fleeing = { action: 'failed', error: String(error.message || error).slice(0, 160) }
+      }
+    }, 700)
+    this.fleeTimer.unref?.()
+  }
+
+  clearAutoFlee () {
+    if (this.fleeTimer) clearInterval(this.fleeTimer)
+    this.fleeTimer = null
+    this.fleeing = null
+  }
+
   clearDefense () {
     if (this.defenseTimer) clearInterval(this.defenseTimer)
     this.defenseTimer = null
@@ -338,20 +382,32 @@ class BotService {
     this.clearControlTimer()
     this.clearDefense()
     this.clearAutoEat()
+    this.clearAutoFlee()
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = null
-    this.bot?.pathfinder?.setGoal(null)
-    this.bot?.clearControlStates()
-    this.bot?.quit('Disconnected via control API')
+    this.bot?.pathfinder?.setGoal?.(null)
+    this.bot?.clearControlStates?.()
+    this.bot?.quit?.('Disconnected via control API')
     this.bot = null
     return { disconnected: true }
   }
 
-  reconnect () {
-    if (!this.stopping) throw Object.assign(new Error('Bot is not disconnected'), { status: 409 })
+  stayOffline () {
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = null
+    this.stopping = true
+    this.state = 'offline'
+  }
+
+  join () {
+    if (!this.stopping) throw Object.assign(new Error('Bot is already connected or connecting'), { status: 409 })
     this.stopping = false
     this.connect()
     return { connecting: true }
+  }
+
+  reconnect () {
+    return this.join()
   }
 
   shutdown () {
@@ -359,9 +415,10 @@ class BotService {
     this.clearControlTimer()
     this.clearDefense()
     this.clearAutoEat()
+    this.clearAutoFlee()
     this.state = 'stopped'
     if (this.retryTimer) clearTimeout(this.retryTimer)
-    this.bot?.quit('Shutting down')
+    this.bot?.quit?.('Shutting down')
   }
 }
 
