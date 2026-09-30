@@ -124,6 +124,7 @@ ${flash ? `<p class="flash ${flash.ok ? 'ok' : 'err'}">${esc(flash.text)}</p>` :
 </div>
 <div class="row">
   <form method="post" action="/panel/join">${hidden}<button type="submit">Join</button></form>
+  <form method="post" action="/panel/jump">${hidden}<button type="submit">Jump</button></form>
   <form method="post" action="/panel/stop">${hidden}<button type="submit" class="warn">Stop</button></form>
   <form method="post" action="/panel/quit">${hidden}<button type="submit" class="danger">Quit</button></form>
 </div>
@@ -348,6 +349,9 @@ function panel (service, token) {
       case 'stop':
         service.stop()
         return 'Stopped current movement'
+      case 'jump':
+        service.move('jump', 500)
+        return 'Jumped for half a second; current navigation stopped'
       case 'chat': {
         const message = stringField(fields.message, 'message')
         service.ready().chat(message)

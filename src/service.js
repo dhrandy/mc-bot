@@ -59,7 +59,15 @@ class BotService {
       const movements = new Movements(bot)
       movements.liquidCost = 25
       movements.allowSprinting = false
-      movements.canDig = false
+      movements.canDig = true
+      // Punch through natural terrain, not containers, controls, logs or planks.
+      // Keep pathfinder's liquid-flow and falling-block checks enabled.
+      const terrain = /^(?:.*_leaves|short_grass|tall_grass|grass|fern|large_fern|dirt|grass_block|coarse_dirt|rooted_dirt|podzol|mycelium|mud|clay|sand|red_sand|gravel|stone|cobblestone|deepslate|cobbled_deepslate|granite|diorite|andesite|tuff|calcite|netherrack|end_stone|.*_ore)$/
+      for (const block of bot.registry.blocksArray) {
+        if (!terrain.test(block.name)) movements.blocksCantBreak.add(block.id)
+      }
+      movements.maxDropDown = 3
+      movements.scafoldingBlocks = []
       movements.allow1by1towers = false
       movements.infiniteLiquidDropdownDistance = false
       movements.exclusionAreasPlace.push(() => 100)

@@ -148,10 +148,13 @@ async function harvest (service, coords, replant = false) {
 // Mining is an explicit, single-block request. The server registry decides what a
 // block drops and which tool can harvest it; breaking it alone does not guarantee a drop.
 const unsafeToGather = /^(?:air|cave_air|void_air|water|flowing_water|lava|flowing_lava|fire|soul_fire|bedrock|barrier|.*(?:portal|command_block|structure_block|spawner|chest|barrel|shulker_box|furnace|hopper|dispenser|dropper|beacon|_bed|_door|trapdoor|button|lever|pressure_plate|_sign|_rail|piston|tnt))$/
+// Clearing leaves and grass does not require a harvest tool or promise a drop.
+const foliage = name => /^(?:.*_leaves|short_grass|tall_grass|grass|fern|large_fern)$/.test(name)
 const treeLog = /^(?:oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/
 const adjacent = [new Vec3(0, 1, 0), new Vec3(0, -1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)]
 
 function gatheringTool (bot, block) {
+  if (foliage(block.name)) return null
   const allowed = bot.registry.blocksByName?.[block.name]?.harvestTools
   if (allowed && Object.keys(allowed).length) {
     const tool = bot.inventory.items().find(item => allowed[item.type])
@@ -176,7 +179,22 @@ async function gather (service, coords) {
       if (!leaves) fail('Log has no nearby leaves; it may be player-built, so it was not broken')
     }
     const feet = bot.entity.position.floored()
-    if (block.position.x === feet.x && block.position.z === feet.z && block.position.y < feet.y) fail('Will not dig beneath the bot')
+    if (block.position.x === feet.x && block.position.z === feet.z && block.position.y < feet.y) {
+      if (!block.name.endsWith('_leaves') || block.position.y !== feet.y - 1) fail('Will not dig beneath the bot')
+      // Only step down through the supporting leaf when loaded solid ground is close.
+      // Never turn a manual canopy escape into a fall into water, lava or a deep hole.
+      let landing = false
+      for (let depth = 1; depth <= 3; depth++) {
+        const below = bot.blockAt(block.position.offset(0, -depth, 0))
+        if (!below || /^(?:water|lava|flowing_water|flowing_lava|fire|soul_fire)$/.test(below.name)) break
+        if (below.boundingBox === 'block') {
+          landing = !/^(?:sand|red_sand|gravel|.*concrete_powder|magma_block|cactus)$/.test(below.name)
+          break
+        }
+        if (!empty(below)) break
+      }
+      if (!landing) fail('Leaf below the bot has no safe landing within three blocks')
+    }
     if (Object.values(bot.entities || {}).some(entity => entity.type === 'player' && entity.position && gap(entity.position, block.position) < 2)) fail('Player is too close to the target block')
     if (adjacent.some(offset => /^(?:lava|flowing_lava)$/.test(bot.blockAt(block.position.plus(offset))?.name || ''))) fail('Lava borders the target block')
     if (!bot.canDigBlock(block)) fail('Block cannot be safely dug from here')

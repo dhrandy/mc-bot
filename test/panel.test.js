@@ -17,6 +17,7 @@ function stubService () {
     },
     join () { this.calls.push(['join']); return { connecting: true } },
     disconnect () { this.calls.push(['quit']); return { disconnected: true } },
+    move (mode, durationMs) { this.calls.push(['move', mode, durationMs]); return { mode, durationMs } },
     stop () { this.calls.push(['stop']); return { stopped: true } },
     follow (player) { this.calls.push(['follow', player]); return { following: player } },
     goto (x, y, z) { this.calls.push(['goto', x, y, z]); return { id: 1, state: 'moving', target: { x, y, z } } },
@@ -78,6 +79,7 @@ test('panel hides behind the login form and never exposes the API token', async 
     assert.equal(panel.status, 200)
     const body = await panel.text()
     assert.match(body, /action="\/panel\/join"/)
+    assert.match(body, /action="\/panel\/jump"/)
     assert.match(body, /action="\/panel\/goto"/)
     assert.match(body, /action="\/panel\/gather"/)
     assert.match(body, /action="\/panel\/shelter"/)
@@ -146,5 +148,26 @@ test('join, quit and auto-flee API routes stay behind the bearer token', async (
     assert.deepEqual((await (await api('/api/auto-flee', { enabled: true })).json()), { autoFlee: true })
     assert.equal((await api('/api/auto-flee', { enabled: 'yes' })).status, 400)
     assert.deepEqual(service.calls, [['join'], ['quit'], ['autoFlee', true]])
+  })
+})
+
+
+test('Jump is a session and CSRF protected real form with a fixed duration', async () => {
+  const service = stubService()
+  await withPanel(service, async ({ get, post }) => {
+    const cookie = await signIn(post)
+    const csrf = await csrfOf(get, cookie)
+    assert.equal((await post('/panel/jump', { csrf })).status, 303)
+    assert.equal((await post('/panel/jump', {}, cookie)).status, 403)
+    assert.equal((await post('/panel/jump', { csrf: 'wrong' }, cookie)).status, 403)
+    assert.deepEqual(service.calls, [])
+    assert.equal((await post('/panel/jump', { csrf, durationMs: '30000' }, cookie)).status, 303)
+    assert.deepEqual(service.calls, [['move', 'jump', 500]])
+    const response = await get('/panel', cookie)
+    assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow, noarchive')
+    assert.match(await response.text(), /Jumped for half a second/)
+    service.move = () => { throw Object.assign(new Error('Bot is not in the world'), { status: 503 }) }
+    await post('/panel/jump', { csrf }, cookie)
+    assert.match(await (await get('/panel', cookie)).text(), /Bot is not in the world/)
   })
 })

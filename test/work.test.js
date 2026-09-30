@@ -35,7 +35,7 @@ function fixture () {
   const service = new BotService({})
   service.bot = bot
   service.state = 'online'
-  const put = (x, y, z, name, props = { age: 7 }) => blocks.set(new Vec3(x, y, z).toString(), { name, position: new Vec3(x, y, z), boundingBox: 'block', getProperties: () => props })
+  const put = (x, y, z, name, props = { age: 7 }) => blocks.set(new Vec3(x, y, z).toString(), { name, position: new Vec3(x, y, z), boundingBox: data.blocksByName[name]?.boundingBox || 'block', getProperties: () => props })
   return { bot, service, calls, inventory, put }
 }
 
@@ -169,4 +169,31 @@ test('gather bare-handed dirt, sand, gravel and wood, and select registry-approv
     assert.match((await post('/api/gather', { x: 2, y: 64, z: 0 })).data.error, /Lava/)
   })
   assert.ok(calls.some(call => call[0] === 'unequip'))
+})
+
+test('punch foliage by hand, including a supporting leaf with a short safe landing', async () => {
+  const { service, bot, put, calls } = fixture()
+  for (const name of ['oak_leaves', 'mangrove_leaves', 'short_grass', 'tall_grass']) {
+    put(2, 64, 0, name)
+    const result = await service.gather({ x: 2, y: 64, z: 0 })
+    assert.equal(result.tool, 'hand')
+    assert.deepEqual(calls.at(-1), ['dig', name])
+  }
+  put(0, 63, 0, 'oak_leaves')
+  assert.equal((await service.gather({ x: 0, y: 63, z: 0 })).gathered, 'oak_leaves')
+  for (const hazard of ['lava', 'water', 'gravel']) {
+    put(0, 62, 0, hazard)
+    await assert.rejects(service.gather({ x: 0, y: 63, z: 0 }), /no safe landing/)
+  }
+  for (let y = 60; y <= 62; y++) put(0, y, 0, 'air')
+  await assert.rejects(service.gather({ x: 0, y: 63, z: 0 }), /no safe landing/)
+  put(0, 62, 0, 'dirt')
+  put(0, 63, 0, 'dirt')
+  await assert.rejects(service.gather({ x: 0, y: 63, z: 0 }), /beneath the bot/)
+  put(2, 64, 0, 'oak_leaves')
+  put(3, 64, 0, 'lava')
+  await assert.rejects(service.gather({ x: 2, y: 64, z: 0 }), /Lava/)
+  put(3, 64, 0, 'air')
+  bot.entities.player = { type: 'player', position: new Vec3(2, 64, 0) }
+  await assert.rejects(service.gather({ x: 2, y: 64, z: 0 }), /Player is too close/)
 })

@@ -102,7 +102,17 @@ test('spawn configures safer pathfinder movements and end records the disconnect
   bot.emit('spawn')
   assert.equal(bot.movements.liquidCost, 25)
   assert.equal(bot.movements.allowSprinting, false)
-  assert.equal(bot.movements.canDig, false)
+  assert.equal(bot.movements.canDig, true)
+  assert.equal(bot.movements.maxDropDown, 3)
+  assert.deepEqual(bot.movements.scafoldingBlocks, [])
+  assert.equal(bot.movements.dontCreateFlow, true)
+  assert.equal(bot.movements.dontMineUnderFallingBlock, true)
+  for (const name of ['oak_leaves', 'mangrove_leaves', 'short_grass', 'tall_grass', 'dirt', 'stone']) {
+    assert.equal(bot.movements.blocksCantBreak.has(bot.registry.blocksByName[name].id), false, name)
+  }
+  for (const name of ['chest', 'barrel', 'oak_log', 'oak_planks', 'tnt', 'white_bed', 'lever', 'bedrock']) {
+    assert.equal(bot.movements.blocksCantBreak.has(bot.registry.blocksByName[name].id), true, name)
+  }
   assert.equal(bot.movements.allow1by1towers, false)
   assert.equal(bot.movements.infiniteLiquidDropdownDistance, false)
   assert.equal(bot.movements.exclusionPlace({}), 100)
@@ -130,4 +140,57 @@ test('stayOffline keeps the bot off the server until join is requested', async (
   assert.throws(() => service.join(), { status: 409 })
   assert.throws(() => service.reconnect(), { status: 409 })
   service.shutdown()
+})
+
+test('configured pathfinder plans a punch through leaves and refuses protected or hazardous blocks', () => {
+  const Vec3 = require('vec3')
+  const bot = new EventEmitter()
+  bot.registry = require('minecraft-data')('26.1')
+  const Block = require('prismarine-block')(bot.registry)
+  const blocks = new Map()
+  const put = (x, y, z, name) => {
+    const block = Block.fromStateId(bot.registry.blocksByName[name].defaultState, 0)
+    block.position = new Vec3(x, y, z)
+    blocks.set(block.position.toString(), block)
+    return block
+  }
+  bot.entity = { position: new Vec3(0, 70, 0), effects: {} }
+  bot.blockAt = pos => blocks.get(pos.toString()) || put(pos.x, pos.y, pos.z, 'air')
+  bot.loadPlugin = () => {}
+  bot.pathfinder = { setMovements: m => { bot.movements = m }, bestHarvestTool: () => null }
+  bot.quit = () => {}
+  const service = new BotService({ mcHost: 'localhost', mcAccountId: 'test' }, () => bot)
+  service.connect()
+  bot.emit('spawn')
+  const m = bot.movements
+  put(0, 69, 0, 'oak_leaves')
+  put(1, 69, 0, 'oak_leaves')
+  put(1, 70, 0, 'oak_leaves')
+  const Move = require('mineflayer-pathfinder/lib/move')
+  const options = []
+  m.getMoveForward(new Move(0, 70, 0, 0, 0), { x: 1, z: 0 }, options)
+  assert.ok(options.some(move => move.toBreak.some(pos => pos.equals(new Vec3(1, 70, 0)))), 'forward move should include punching the obstructing leaf')
+  assert.ok(options.every(move => move.toPlace.length === 0))
+  assert.equal(m.safeToBreak(bot.blockAt(new Vec3(1, 70, 0))), true)
+  put(2, 70, 0, 'water')
+  assert.equal(m.safeToBreak(bot.blockAt(new Vec3(1, 70, 0))), false)
+  put(2, 70, 0, 'air')
+  put(1, 71, 0, 'gravel')
+  assert.equal(m.safeToBreak(bot.blockAt(new Vec3(1, 70, 0))), false)
+  put(1, 71, 0, 'air')
+  for (const name of ['chest', 'oak_planks', 'oak_log', 'tnt']) {
+    const block = put(1, 70, 0, name)
+    assert.equal(Boolean(m.safeToBreak(block)), false, name)
+  }
+  service.shutdown()
+})
+
+test('jump releases automatically after its bounded duration', async () => {
+  const { service, controls } = onlineService()
+  await withServer(service, async post => {
+    assert.equal((await post('/api/jump', { durationMs: 100 })).status, 200)
+    assert.equal(controls.jump, true)
+    await new Promise(resolve => setTimeout(resolve, 150))
+    assert.equal(controls.jump, false)
+  })
 })
