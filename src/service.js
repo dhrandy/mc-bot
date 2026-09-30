@@ -4,6 +4,7 @@ const { DANGEROUS, MELEE, distance, mobName, strategy, defend, selectThreat, fle
 const { SAFE_FOODS, chooseFood } = require('./food')
 const Vec3 = require('vec3')
 const work = require('./work')
+const { escapeCanopy } = require('./navigation')
 
 function errorText (error) {
   if (Array.isArray(error?.errors) && error.errors.length) return errorText(error.errors[0])
@@ -143,16 +144,67 @@ class BotService {
     const b = this.ready()
     this.clearControlTimer()
     const id = ++this.actionId
+    b.pathfinder.setGoal(null)
+    b.stopDigging?.()
+    this.lastError = null
     this.navigation = { id, state: 'moving', target: { x, y, z } }
     const goal = new goals.GoalNear(x, y, z, 1)
-    Promise.resolve().then(() => b.pathfinder.goto(goal)).then(() => {
-      if (this.actionId === id && this.bot === b) this.navigation = { id, state: 'arrived', target: { x, y, z } }
+    const active = () => this.actionId === id && this.bot === b && this.state === 'online'
+    const report = details => {
+      if (!active()) return
+      Object.assign(this.navigation, details)
+      console.log('Navigation:', JSON.stringify({ id, ...details }))
+    }
+    // goto() can resolve on an empty path even when the goal was not reached.
+    // Own completion and diagnostics instead of trusting that promise alone.
+    Promise.resolve().then(async () => {
+      if (!active()) return
+      await escapeCanopy(b, { x, y, z }, active, report)
+      if (!active()) return
+      report({ phase: 'pathfinding' })
+      await this.walkTo(b, goal, active, report)
+      if (active()) this.navigation = { id, state: 'arrived', target: { x, y, z } }
     }).catch(error => {
-      if (this.actionId !== id || this.bot !== b) return
-      this.navigation = { id, state: 'failed', target: { x, y, z }, error: String(error.message || error).slice(0, 200) }
+      if (!active()) return
+      b.pathfinder.setGoal(null)
+      b.clearControlStates()
+      b.stopDigging?.()
+      this.navigation = { ...this.navigation, state: 'failed', error: String(error.message || error).slice(0, 200) }
+      this.lastError = this.navigation.error
       console.error('Navigation failed:', this.navigation.error)
     })
     return this.navigation
+  }
+
+  async walkTo (bot, goal, active, report) {
+    let lastProgress = Date.now()
+    let position = bot.entity.position.clone?.() || new Vec3(bot.entity.position.x, bot.entity.position.y, bot.entity.position.z)
+    let resets = 0
+    let digFailures = 0
+    let fail
+    const watchdog = new Promise((resolve, reject) => { fail = reject })
+    const onPath = result => report({ pathStatus: result.status, pathLength: result.path.length, onGround: Boolean(bot.entity.onGround) })
+    const onReset = reason => {
+      report({ resetReason: reason })
+      if (reason === 'dig_error' && ++digFailures >= 2) fail(new Error('Server rejected repeated digging; check spawn or region protection'))
+      if (reason === 'stuck' && ++resets >= 3) fail(new Error('Pathfinder repeatedly stuck; stopped navigation'))
+    }
+    const timer = setInterval(() => {
+      if (!active()) return fail(new Error('Navigation cancelled'))
+      const current = bot.entity.position
+      if (position.distanceTo(current) > 0.25) { position = current.clone(); lastProgress = Date.now() }
+      if (Date.now() - lastProgress > 15000) fail(new Error('No movement for 15 seconds; stopped navigation'))
+    }, 250)
+    bot.on?.('path_update', onPath)
+    bot.on?.('path_reset', onReset)
+    try {
+      await Promise.race([bot.pathfinder.goto(goal), watchdog])
+      if (active() && !goal.isEnd(bot.entity.position.floored())) throw new Error('Pathfinder ended without reaching the target')
+    } finally {
+      clearInterval(timer)
+      bot.removeListener?.('path_update', onPath)
+      bot.removeListener?.('path_reset', onReset)
+    }
   }
 
   follow (name) {
@@ -173,6 +225,7 @@ class BotService {
     this.clearControlTimer()
     b.pathfinder.setGoal(null)
     b.clearControlStates()
+    b.stopDigging?.()
     this.defense = null
     this.defenseArmedUntil = 0
     return { stopped: true }
