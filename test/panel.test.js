@@ -35,7 +35,10 @@ async function withPanel (service, fn) {
     async status () { this.calls.push(['status']); return { status: 'ok', server: { name: 'main', running: true, online: 2, max: 20, version: '1.21.4' } } },
     async logs (limit) { this.calls.push(['logs', limit]); return { status: 'ok', lines: ['hello'] } },
     async action (name) { this.calls.push(['action', name]); return { status: 'ok' } },
-    async command (command) { this.calls.push(['command', command]); return { status: 'ok' } }
+    async command (command) {
+      if (/[\r\n\0]/.test(command.trim()) || command.trimStart().startsWith('/')) throw Object.assign(new Error('invalid command'), { status: 400 })
+      this.calls.push(['command', command]); return { status: 'ok' }
+    }
   }
   const app = server(service, token, crafty)
   await new Promise(resolve => app.listen(0, '127.0.0.1', resolve))
@@ -142,6 +145,9 @@ test('Crafty panel controls require login and CSRF and proxy bounded operations 
     for (const action of ['start', 'stop', 'restart']) assert.match(page, new RegExp(`action="/panel/crafty/${action}"`))
     assert.match(page, /crafty-load-logs/)
     assert.match(page, /crafty-command/)
+    assert.doesNotMatch(page, /onclick=/i)
+    const appJs = await (await get('/panel/app.js', cookie)).text()
+    assert.match(appJs, /form\[action=\"\/panel\/crafty\/command\"\]/)
     const logs = await get('/panel/crafty/logs.json?limit=100', cookie)
     assert.equal(logs.status, 200)
     assert.deepEqual(await logs.json(), { status: 'ok', lines: ['hello'] })
@@ -152,8 +158,29 @@ test('Crafty panel controls require login and CSRF and proxy bounded operations 
     assert.equal((await post('/panel/crafty/restart', { csrf }, cookie)).status, 303)
     assert.equal((await post('/panel/crafty/command', { csrf, command: 'say hello' }, cookie)).status, 303)
     assert.equal((await post('/panel/crafty/command', { csrf, command: 'say\nstop' }, cookie)).status, 303)
+    assert.deepEqual(crafty.calls.filter(call => call[0] === 'command'), [['command', 'say hello']])
     assert.deepEqual((await get('/panel/crafty/status.json', cookie)).status, 200)
   })
+})
+
+test('login rate limit ignores spoofed forwarded client addresses', async () => {
+  const app = server(stubService(), token)
+  await new Promise(resolve => app.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${app.address().port}/login`
+  try {
+    for (let i = 0; i < 5; i++) {
+      const response = await fetch(url, {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-for': `198.51.100.${i + 1}` },
+        body: new URLSearchParams({ password: 'wrong-wrong-wrong-wrong-wrong' }), redirect: 'manual'
+      })
+      assert.equal(response.status, 401)
+    }
+    const bypass = await fetch(url, {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-for': '203.0.113.200' },
+      body: new URLSearchParams({ password: token }), redirect: 'manual'
+    })
+    assert.equal(bypass.status, 429)
+  } finally { app.close() }
 })
 
 test('login rate limiting locks out repeated failures', async () => {

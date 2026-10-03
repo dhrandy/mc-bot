@@ -105,8 +105,8 @@ class CraftyClient {
   }
 
   async command (command) {
-    if (typeof command !== 'string' || !command.trim() || command.length > 512 || /[\r\n\0]/.test(command) || command.startsWith('/') || command.includes(this.token)) {
-      throw Object.assign(new Error('command must be 1-512 characters on one line, without a leading slash or the Crafty token'), { status: 400 })
+    if (typeof command !== 'string' || !command.trim() || command.length > 512 || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(command) || command.trimStart().startsWith('/') || command.includes(this.token)) {
+      throw Object.assign(new Error('command must be 1-512 characters on one line, without a leading slash (even after whitespace) or the Crafty token'), { status: 400 })
     }
     const result = await this.request('/stdin', { method: 'POST', body: command, contentType: 'text/plain; charset=utf-8' })
     if (result?.status !== 'ok') throw new Error('Crafty API did not confirm the command')

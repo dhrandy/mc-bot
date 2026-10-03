@@ -8,6 +8,7 @@ const LOGIN_WINDOW_MS = 10 * 60 * 1000
 const LOGIN_MAX_FAILURES = 5
 const LOGIN_LOCK_MS = 10 * 60 * 1000
 const MAX_SESSIONS = 500
+const MAX_LOGIN_ATTEMPT_IPS = 1000
 
 function esc (value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
@@ -167,7 +168,7 @@ ${craftyEnabled ? `<details open>
     <label for="crafty-command">Console command</label>
     <textarea id="crafty-command" name="command" maxlength="512" required spellcheck="false" placeholder="list"></textarea>
     <p class="muted">One line, up to 512 characters. Console commands can change the world.</p>
-    <p><button type="submit" onclick="return confirm('Send this command to the configured Minecraft server console?')">Send console command</button></p>
+    <p><button type="submit">Send console command</button></p>
   </form>
 </details>` : ''}
 <details>
@@ -273,6 +274,9 @@ async function loadCraftyLogs () {
   } catch (error) { output.textContent = error.message || 'Could not load logs.' }
 }
 document.getElementById('crafty-load-logs')?.addEventListener('click', loadCraftyLogs)
+document.querySelector('form[action="/panel/crafty/command"]')?.addEventListener('submit', event => {
+  if (!window.confirm('Send this command to the configured Minecraft server console?')) event.preventDefault()
+})
 if (craftyEnabled) tickCraftyStatus()
 setInterval(tick, 5000)
 `
@@ -324,8 +328,7 @@ function panel (service, token, crafty = null) {
   }
 
   function clientIp (req) {
-    const forwarded = req.headers['x-forwarded-for']
-    if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim().slice(0, 64)
+    // Use the peer address only: X-Forwarded-For is spoofable unless a trusted proxy is explicitly configured.
     return req.socket.remoteAddress || 'unknown'
   }
 
@@ -378,24 +381,37 @@ function panel (service, token, crafty = null) {
     if (presented.length !== expected.length || !crypto.timingSafeEqual(presented, expected)) throw bad('Missing or bad form token', 403)
   }
 
+  function pruneAttempts (now) {
+    for (const [ip, record] of attempts) {
+      const windowExpired = now - record.first > LOGIN_WINDOW_MS
+      const lockExpired = !record.lockedUntil || record.lockedUntil <= now
+      if (windowExpired && lockExpired) attempts.delete(ip)
+    }
+  }
+
   function lockedOut (ip) {
     const record = attempts.get(ip)
     return Boolean(record && record.lockedUntil && record.lockedUntil > Date.now())
   }
 
+  function capacityReached (ip) {
+    const now = Date.now()
+    pruneAttempts(now)
+    return !attempts.has(ip) && attempts.size >= MAX_LOGIN_ATTEMPT_IPS
+  }
+
   function recordFailure (ip) {
     const now = Date.now()
+    pruneAttempts(now)
     let record = attempts.get(ip)
     if (!record || now - record.first > LOGIN_WINDOW_MS) record = { fails: 0, first: now, lockedUntil: 0 }
     record.fails++
     if (record.fails >= LOGIN_MAX_FAILURES) record.lockedUntil = now + LOGIN_LOCK_MS
     attempts.set(ip, record)
-    if (attempts.size > 1000) attempts.clear()
   }
 
   function auditCrafty (action) {
-    const caller = crypto.createHash('sha256').update(token).digest('hex').slice(0, 12)
-    console.info('Crafty panel control:', JSON.stringify({ at: new Date().toISOString(), action, caller }))
+    console.info('Crafty panel control:', JSON.stringify({ at: new Date().toISOString(), action }))
   }
 
   function correctPassword (password) {
@@ -489,6 +505,7 @@ function panel (service, token, crafty = null) {
       if (req.method === 'POST' && path === '/login') {
         const ip = clientIp(req)
         if (lockedOut(ip)) return html(res, 429, loginPage('Too many tries. Wait a few minutes and try again.')), true
+        if (capacityReached(ip)) return html(res, 429, loginPage('Login is temporarily busy. Try again in a few minutes.')), true
         const fields = await formBody(req)
         if (!correctPassword(fields.password)) {
           recordFailure(ip)
