@@ -1,8 +1,16 @@
 const DEFAULT_TIMEOUT_MS = 10000
 const MAX_LOG_LIMIT = 200
 
+function cleanConfigValue (value) {
+  let cleaned = String(value ?? '').trim()
+  if (cleaned.length >= 2 && ((cleaned.startsWith('\"') && cleaned.endsWith('\"')) || (cleaned.startsWith("'") && cleaned.endsWith("'")))) {
+    cleaned = cleaned.slice(1, -1).trim()
+  }
+  return cleaned
+}
+
 function apiBase (value) {
-  const url = new URL(value)
+  const url = new URL(cleanConfigValue(value))
   if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '::1'].includes(url.hostname)) {
     throw new Error('Crafty API URL must use HTTPS')
   }
@@ -46,8 +54,11 @@ function serverStatus (result) {
 
 class CraftyClient {
   constructor ({ baseUrl, serverId, token, fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+    baseUrl = cleanConfigValue(baseUrl)
+    serverId = cleanConfigValue(serverId)
+    token = cleanConfigValue(token)
     if (!baseUrl || !serverId || !token) throw new Error('Crafty API configuration is incomplete')
-    if (!/^[A-Za-z0-9_-]{1,100}$/.test(String(serverId))) throw new Error('Crafty server ID is invalid')
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(serverId)) throw new Error('Crafty server ID is invalid')
     if (typeof fetchImpl !== 'function') throw new Error('Fetch is unavailable')
     this.baseUrl = apiBase(baseUrl)
     this.serverId = String(serverId)
@@ -69,8 +80,12 @@ class CraftyClient {
         redirect: 'error',
         ...(body === undefined ? {} : { body })
       })
-      if (!response.ok) throw new Error(`Crafty API returned HTTP ${response.status}`)
       const text = await response.text()
+      if (!response.ok) {
+        const snippet = redact(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim(), this.token).slice(0, 300)
+        const detail = snippet ? `: ${snippet}` : ''
+        throw new Error(`Crafty API returned HTTP ${response.status}${detail}`)
+      }
       let data
       try { data = JSON.parse(text) } catch { throw new Error('Crafty API returned invalid JSON') }
       if (data?.status === 'error') throw new Error(`Crafty API error${data.error ? `: ${String(data.error).slice(0, 120)}` : ''}`)
@@ -114,4 +129,4 @@ class CraftyClient {
   }
 }
 
-module.exports = { CraftyClient, MAX_LOG_LIMIT }
+module.exports = { CraftyClient, MAX_LOG_LIMIT, cleanConfigValue }

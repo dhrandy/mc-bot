@@ -99,7 +99,13 @@ test('Crafty routes proxy status, capped logs and actions with existing API auth
   } finally { app.close() }
 })
 
-const { CraftyClient } = require('../src/crafty')
+const { CraftyClient, cleanConfigValue } = require('../src/crafty')
+
+test('Crafty config values trim whitespace and one matching pair of outer quotes', () => {
+  assert.equal(cleanConfigValue('  "https://crafty.example.test/"  '), 'https://crafty.example.test/')
+  assert.equal(cleanConfigValue(" 'server-id' "), 'server-id')
+  assert.equal(cleanConfigValue('   '), '')
+})
 
 test('Crafty client attaches token only as auth and redacts it from responses', async () => {
   const token = 'crafty-secret-test-not-real'
@@ -146,4 +152,21 @@ test('Crafty client validates URL, commands, and log limits; errors do not echo 
   assert.deepEqual((await client.logs(2)).lines, ['line-248', 'line-249'])
   const failing = new CraftyClient({ baseUrl: 'https://crafty.example.test', serverId: 'id', token, fetchImpl: async () => { throw new Error(`Oops ${token}`) } })
   await assert.rejects(failing.status(), error => !error.message.includes(token) && error.message === 'Crafty API request failed')
+})
+
+test('Crafty HTTP errors include bounded sanitized response details without the token', async () => {
+  const token = 'crafty-secret-response-redact-test'
+  const body = `<html>Bad request ${token}${'x'.repeat(500)}\nnext\nline</html>`
+  const client = new CraftyClient({
+    baseUrl: 'https://crafty.example.test', serverId: 'id', token,
+    fetchImpl: async () => new Response(body, { status: 400 })
+  })
+  await assert.rejects(client.status(), error => {
+    assert.match(error.message, /^Crafty API returned HTTP 400: /)
+    assert.match(error.message, /Bad request \[redacted\]/)
+    assert.equal(error.message.includes(token), false)
+    assert.equal(error.message.includes('\\n'), false)
+    assert.ok(error.message.length < 360)
+    return true
+  })
 })
