@@ -1,6 +1,6 @@
 {
   "name": "mc-bot",
-  "version": "0.7.8",
+  "version": "0.8.0",
   "description": "Experimental headless Minecraft Java bot with a small HTTP control API",
   "main": "src/index.js",
   "directories": {

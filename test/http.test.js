@@ -170,3 +170,16 @@ test('Crafty HTTP errors include bounded sanitized response details without the 
     return true
   })
 })
+
+test('survival endpoint never accepts anonymous or wrong-token activation', async () => {
+  const service = new BotService({})
+  const app = server(service, 'test-token-abcdefghijklmnopqrstuvwxyz')
+  await new Promise(resolve => app.listen(0, '127.0.0.1', resolve))
+  try {
+    const url = `http://127.0.0.1:${app.address().port}/api/survive`
+    for (const authorization of ['', 'Bearer wrong']) {
+      assert.equal((await fetch(url, { method: 'POST', headers: { authorization }, body: '{"enabled":true}' })).status, 401)
+    }
+    assert.equal(service.survivalMode.state.enabled, false)
+  } finally { app.close() }
+})

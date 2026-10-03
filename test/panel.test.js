@@ -263,3 +263,22 @@ test('incoming chat requires a session, bounds history and renders hostile text 
     assert.equal((await (await get('/panel/chat.json', cookie)).json()).messages[0].message, 'new live message')
   })
 })
+
+test('Survive panel action is session/CSRF protected with strict booleans', async () => {
+  const service = stubService()
+  service.setSurvive = enabled => { service.calls.push(['survive', enabled]); return { enabled } }
+  await withPanel(service, async ({ get, post }) => {
+    const cookie = await signIn(post)
+    const csrf = await csrfOf(get, cookie)
+    assert.equal((await post('/panel/survive', { enabled: 'true' }, cookie)).status, 403)
+    await post('/panel/survive', { csrf, enabled: 'not-a-bool' }, cookie)
+    assert.equal(service.calls.length, 0)
+    await post('/panel/survive', { csrf, enabled: 'true' }, cookie)
+    assert.deepEqual(service.calls, [['survive', true]])
+    assert.match(await (await get('/panel', cookie)).text(), /automatic starter tasks/)
+    service.survivalMode = { state: { enabled: true } }
+    await post('/panel/goto', { csrf, x: '3', y: '64', z: '0' }, cookie)
+    assert.deepEqual(service.calls, [['survive', true]])
+    assert.match(await (await get('/panel', cookie)).text(), /Disable Survive before manual controls/)
+  })
+})

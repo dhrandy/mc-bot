@@ -5,6 +5,7 @@ const { SAFE_FOODS, chooseFood } = require('./food')
 const Vec3 = require('vec3')
 const work = require('./work')
 const { escapeCanopy } = require('./navigation')
+const { SurvivalMode } = require('./survival-mode')
 
 function errorText (error) {
   if (Array.isArray(error?.errors) && error.errors.length) return errorText(error.errors[0])
@@ -19,6 +20,7 @@ class BotService {
     this.state = 'starting'
     this.lastError = null
     this.messages = []
+    this.survivalMode = new SurvivalMode(this)
     this.retryTimer = null
     this.retries = 0
     this.stopping = false
@@ -81,7 +83,7 @@ class BotService {
     let previousHealth = bot.health ?? null
     bot.on('health', () => {
       if (this.bot !== bot || this.state !== 'online') return
-      if (this.config.autoEat) this.autoEat(bot).catch(error => { this.lastEatError = String(error.message || error).slice(0, 160) })
+      if (this.config.autoEat && !this.survivalMode.state.enabled) this.autoEat(bot).catch(error => { this.lastEatError = String(error.message || error).slice(0, 160) })
       if (this.config.autoDefend && previousHealth !== null && bot.health < previousHealth) this.defenseArmedUntil = Date.now() + 8000
       previousHealth = bot.health
     })
@@ -96,7 +98,11 @@ class BotService {
       this.lastError = errorText(error)
       console.error('Bot error:', this.lastError)
     })
+    bot.on('death', () => {
+      if (this.survivalMode.state.enabled && this.bot === bot) this.survivalMode.leave('Died during survival; leaving without a respawn loop')
+    })
     bot.once('end', reason => {
+      if (this.survivalMode.state.enabled && this.bot === bot) this.survivalMode.leave('Connection ended; survival will not auto-rejoin')
       console.warn('Bot connection ended:', String(reason).slice(0, 200))
       if (this.bot !== bot || this.stopping) return
       this.clearControlTimer()
@@ -123,6 +129,7 @@ class BotService {
       food: b && this.state === 'online' ? b.food : null,
       lastError: this.lastError,
       navigation: this.navigation,
+      survival: { ...this.survivalMode.state },
       autoDefend: Boolean(this.config.autoDefend),
       autoEat: Boolean(this.config.autoEat),
       autoFlee: this.autoFlee,
@@ -220,6 +227,10 @@ class BotService {
   }
 
   stop () {
+    if (this.survivalMode.state.enabled) {
+      this.survivalMode.leave('Stopped by user; quitting to cancel survival work')
+      return { stopped: true, disconnected: true }
+    }
     const b = this.ready()
     this.actionId++
     this.navigation = null
@@ -435,7 +446,14 @@ class BotService {
   gather (coords) { return work.gather(this, coords) }
   shelter (material, origin) { return work.shelter(this, material, origin) }
 
+  setSurvive (enabled) {
+    if (enabled) return this.survivalMode.enable()
+    if (this.survivalMode.state.enabled) this.survivalMode.leave('Survive disabled; leaving the game')
+    return { ...this.survivalMode.state }
+  }
+
   disconnect () {
+    if (this.survivalMode.state.enabled) this.survivalMode.disable('Disconnected by user')
     if (this.stopping) return { disconnected: true }
     this.stopping = true
     this.state = 'disconnected'
@@ -473,6 +491,7 @@ class BotService {
   }
 
   shutdown () {
+    this.survivalMode.disable('Service shutting down')
     this.stopping = true
     this.clearControlTimer()
     this.clearDefense()

@@ -45,6 +45,7 @@ function server (service, token, crafty = null) {
     if (!authorized(req, token)) return respond(res, 401, { error: 'Unauthorized' })
     try {
       const path = new URL(req.url, 'http://localhost').pathname
+      if (req.method === 'POST' && service.survivalMode?.state.enabled && !['/api/survive', '/api/quit', '/api/disconnect', '/api/stop'].includes(path)) return respond(res, 409, { error: 'Disable Survive before manual controls' })
       if (path.startsWith('/api/crafty/')) {
         if (!crafty) return respond(res, 503, { error: 'Crafty integration is not configured' })
         if (req.method === 'GET' && path === '/api/crafty/status') return respond(res, 200, await crafty.status())
@@ -134,6 +135,11 @@ function server (service, token, crafty = null) {
         const input = await body(req)
         materialName(input.material)
         return respond(res, 200, await service.shelter(input.material, blockCoordinates(input)))
+      }
+      if (req.method === 'POST' && path === '/api/survive') {
+        const { enabled } = await body(req)
+        if (typeof enabled !== 'boolean') throw bad('Expected boolean enabled')
+        return respond(res, 200, service.setSurvive(enabled))
       }
       if (req.method === 'POST' && path === '/api/auto-flee') {
         const { enabled } = await body(req)

@@ -146,6 +146,7 @@ ${flash ? `<p class="flash ${flash.ok ? 'ok' : 'err'}">${esc(flash.text)}</p>` :
     <dt>Position</dt>${field('s-position', formatPosition(s.position))}
     <dt>Hostiles</dt>${field('s-hostiles', formatHostiles(s.nearbyHostiles))}
     <dt>Auto-flee</dt>${field('s-flee', s.autoFlee ? 'on' : 'off')}
+    <dt>Survival</dt>${field('s-survival', s.survival ? s.survival.goal + ': ' + s.survival.reason : 'off')}
     <dt>Navigation</dt>${field('s-navigation', formatNavigation(s.navigation))}
     <dt>Last error</dt>${field('s-error', s.lastError || 'none')}
   </dl>
@@ -161,6 +162,14 @@ ${flash ? `<p class="flash ${flash.ok ? 'ok' : 'err'}">${esc(flash.text)}</p>` :
     ${hidden}
     <input type="hidden" name="enabled" value="${s.autoFlee ? 'false' : 'true'}">
     <button type="submit" class="${s.autoFlee ? 'warn' : ''}">${s.autoFlee ? 'Turn auto-flee off' : 'Turn auto-flee on (run from creepers)'}</button>
+  </form>
+</div>
+<div class="card">
+  <form method="post" action="/panel/survive">
+    ${hidden}
+    <input id="survive-enabled" type="hidden" name="enabled" value="${s.survival?.enabled ? 'false' : 'true'}">
+    <button id="survive-toggle" type="submit" class="${s.survival?.enabled ? 'warn' : ''}">${s.survival?.enabled ? 'Disable Survive and quit' : 'Survive (automatic starter tasks)'}</button>
+    <p class="muted">Opt-in. Eats inventory food, handles known hostiles, gathers reachable wood, crafts tools and shelters at night. Leaves when blocked or out of work. May change nearby terrain. No food foraging or long-range exploration. Enable only in an area you permit it to change.</p>
   </form>
 </div>
 ${craftyEnabled ? `<details open>
@@ -270,6 +279,15 @@ const appJs = `const craftyEnabled = document.documentElement.dataset.crafty ===
     set('s-flee', s.autoFlee ? 'on' : 'off')
     set('s-error', s.lastError || 'none')
     set('s-navigation', formatNavigation(s.navigation))
+    const surviveInput = document.getElementById('survive-enabled')
+    const surviveButton = document.getElementById('survive-toggle')
+    if (surviveInput && surviveButton) {
+      const enabled = Boolean(s.survival?.enabled)
+      surviveInput.value = enabled ? 'false' : 'true'
+      surviveButton.textContent = enabled ? 'Disable Survive and quit' : 'Survive (automatic starter tasks)'
+      surviveButton.className = enabled ? 'warn' : ''
+    }
+    set('s-survival', s.survival ? s.survival.goal + ': ' + s.survival.reason + (s.survival.error ? ' (' + s.survival.error + ')' : '') : 'off')
     await tickChat()
     if (craftyEnabled) await tickCraftyStatus()
   } catch (error) { /* keep the last good values on screen */ }
@@ -470,6 +488,7 @@ function panel (service, token, crafty = null) {
   }
 
   async function runAction (name, fields, crafty) {
+    if (service.survivalMode?.state.enabled && !['survive', 'quit', 'stop'].includes(name)) throw bad('Disable Survive before manual controls', 409)
     switch (name) {
       case 'join':
         service.join()
@@ -529,6 +548,11 @@ function panel (service, token, crafty = null) {
         auditCrafty('command')
         await crafty.command(fields.command)
         return 'Console command sent to Crafty server'
+      }
+      case 'survive': {
+        if (!['true', 'false'].includes(fields.enabled)) throw bad('Expected enabled true or false')
+        const result = service.setSurvive(fields.enabled === 'true')
+        return result.enabled ? 'Survive enabled: automatic starter tasks' : 'Survive disabled; bot left the game'
       }
       case 'auto-flee': {
         if (!['true', 'false'].includes(fields.enabled)) throw bad('Expected enabled true or false')

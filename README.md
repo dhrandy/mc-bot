@@ -222,7 +222,7 @@ This remains an experimental build. Earlier live play showed the bot getting tra
 
 ### Deferred controls
 
-There is no autonomous mining, recursive crafting, general mob AI or container access. Mining is one requested block at a time; some blocks may be unsafe despite preflight checks. Advanced combat needs equipment, line-of-sight and live fight testing; digging can alter the world. Auto-eating only uses food already in inventory; farming and crafting are manual API actions, not an autonomous loop. Hunting passive mobs is not implemented. No free sprint toggle is exposed because disabling sprinting avoids a known pathfinder waterline problem. No general-purpose keypress endpoint is exposed; jump and swim are bounded instead.
+There is no long-range autonomous mining, general recursive crafting, food foraging or container access. The optional starter survival mode below performs a bounded nearby wood/tool sequence. Mining is one requested block at a time; some blocks may be unsafe despite preflight checks. Advanced combat needs equipment, line-of-sight and live fight testing; digging can alter the world. Auto-eating only uses food already in inventory; farming stays manual. Survival mode can craft its narrow starter sequence; other recipes remain manual API actions. Hunting passive mobs is not implemented. No free sprint toggle is exposed because disabling sprinting avoids a known pathfinder waterline problem. No general-purpose keypress endpoint is exposed; jump and swim are bounded instead.
 
 ## 0.7.8
 
@@ -230,3 +230,19 @@ There is no autonomous mining, recursive crafting, general mob AI or container a
 - Go To now uses an exact target block instead of a one-block-radius goal. The panel displays navigation completion and failure instead of leaving a static "Walking" message. Fractional coordinates choose their containing block.
 - Added regression tests for waypoint arrival, false pathfinder completion, chat authentication, history limits and hostile chat text.
 - Live movement and chat still need verification after upgrading; tests do not replace a survival-world check.
+
+## 0.8.0: opt-in starter survival mode
+
+Join first, then press **Survive (automatic starter tasks)** on the panel or send `POST /api/survive` with `{"enabled":true}`. It is off on every process start and never starts just because the container is pulled or the bot joins. No API-hardening or settings-file changes are part of this release. Only enable it in an area you permit the bot to change. Survival is experimental, not a promise of unattended Minecraft competence. Live checks are required after upgrading.
+
+Priority is safety, food, night shelter, then nearby starter work:
+
+- Critical health (6 or less), water/lava, death, lost connection, failed work, no safe escape or no further work makes it quit. It does not auto-rejoin after survival quits.
+- Known nearby melee hostiles are fought only when health is at least 16 and a sword is in inventory. Players, passive mobs and unknown mobs are never attacked. Other known threats use a four-block flat escape corridor checked for loaded ground, hazards and nearby players. Autonomous path movement disables digging; it does not create a route by tearing through builds. If a hostile closes within four blocks while a world action is pending, it disconnects instead of running overlapping actions.
+- At food 14 or below it eats safe inventory food. It does not hunt, farm or search for food. No food when hungry means quit, not starvation.
+- During night (12500-23499 ticks), 25 dirt, cobblestone or common planks can become a closed 3x3 outer shell, with a 1x1 interior and roof. Every target must be loaded and empty, supported by safe ground, away from players, and server-confirmed after placement. It then quits rather than waiting through the night. This shell has no doorway: break one of its ordinary blocks to leave after rejoining. Existing terrain is not replaced. With insufficient material or an occupied footprint it quits.
+- During daylight it gathers one reachable log at a time using existing gather protection checks, confirms inventory pickup before taking another, crafts planks, a table, sticks, a wooden pickaxe and sword, and stocks shelter blocks. Only nearby logs within 4.5 blocks are considered; no exploration or tree-chopping expedition. Leaf proximity is a heuristic, not proof that a log is natural. Builds containing leafy logs can still resemble trees, so use an approved natural area. The table is placed only on clear loaded ground away from players.
+
+The panel's Survival row and `GET /api/status` expose `survival.enabled`, `goal`, `reason`, `error` and `updatedAt`. There are no secrets or chat-directed tasks in the loop. Incoming Minecraft chat is data, never commands. Manual mutation routes and panel actions return an error while Survive is enabled, except Stop, Quit and Survive itself. Reads remain available. Disabling Survive or pressing Stop quits, cancelling world work rather than leaving a pending dig behind. Turning survival off does not restore the old auto-defense/eat/flee timers until a new join; it leaves the bot disconnected.
+
+Each action has a 15-second timeout. A session has a starter-work budget of 120 turns or ten minutes, whichever comes first; it then quits. These bounds prevent an unending resource/damage loop. This is a first survival batch: no stone upgrades, roaming, bed crafting, farming, storage or autonomous food collection. Test with low-value inventory and watch the first run.

@@ -222,3 +222,17 @@ test('Go To rejects false pathfinder completion and clears movement', async () =
   assert.match(service.lastError, /without reaching the target/)
   assert.equal(goals.at(-1), null)
 })
+
+test('survival API validates booleans and blocks conflicting manual mutation', async () => {
+  const { service } = onlineService()
+  service.setSurvive = enabled => ({ enabled })
+  await withServer(service, async post => {
+    assert.equal((await post('/api/survive', { enabled: 'true' })).status, 400)
+    assert.equal((await post('/api/survive', { enabled: false })).status, 200)
+    service.survivalMode.state.enabled = true
+    assert.equal((await post('/api/goto', { x: 3, y: 64, z: 0 })).status, 409)
+    assert.equal((await post('/api/chat', { message: 'not sent' })).status, 409)
+    assert.equal((await post('/api/quit')).status, 200)
+    assert.equal(service.state, 'disconnected')
+  })
+})

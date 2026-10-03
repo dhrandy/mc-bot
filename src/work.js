@@ -202,9 +202,11 @@ async function gather (service, coords) {
     if (tool) await bot.equip(tool, 'hand')
     else await bot.unequip('hand') // An unsuitable held tool may be destroyed without yielding drops.
     await bot.dig(block)
+    if (service.bot !== bot || service.state !== 'online') fail('Gather cancelled; bot left the world')
     const dropped = Object.values(bot.entities || {}).filter(entity => entity.name === 'item' && entity.position && gap(entity.position, block.position) < 3)
     let pickup = 'no nearby dropped item observed; approach the drops manually'
-    if (dropped.length) {
+    // Survival does not chase an uninspected drop position.
+    if (dropped.length && !service.survivalMode?.state.enabled) {
       const item = dropped.sort((a, b) => gap(a.position, bot.entity.position) - gap(b.position, bot.entity.position))[0]
       if (gap(item.position, bot.entity.position) <= 4.5) {
         await bot.pathfinder.goto(new goals.GoalNear(item.position.x, item.position.y, item.position.z, 1))
