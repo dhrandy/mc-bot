@@ -30,7 +30,14 @@ function stubService () {
 }
 
 async function withPanel (service, fn) {
-  const app = server(service, token)
+  const crafty = {
+    calls: [],
+    async status () { this.calls.push(['status']); return { status: 'ok', server: { name: 'main', running: true, online: 2, max: 20, version: '1.21.4' } } },
+    async logs (limit) { this.calls.push(['logs', limit]); return { status: 'ok', lines: ['hello'] } },
+    async action (name) { this.calls.push(['action', name]); return { status: 'ok' } },
+    async command (command) { this.calls.push(['command', command]); return { status: 'ok' } }
+  }
+  const app = server(service, token, crafty)
   await new Promise(resolve => app.listen(0, '127.0.0.1', resolve))
   const base = `http://127.0.0.1:${app.address().port}`
   const get = (path, cookie) => fetch(base + path, { headers: cookie ? { cookie } : {}, redirect: 'manual' })
@@ -40,7 +47,7 @@ async function withPanel (service, fn) {
     body: new URLSearchParams(fields).toString(),
     redirect: 'manual'
   })
-  try { await fn({ get, post, base }) } finally { app.close() }
+  try { await fn({ get, post, base, crafty }) } finally { app.close() }
 }
 
 async function signIn (post) {
@@ -121,6 +128,31 @@ test('panel chat while offline shows the service error instead of crashing', asy
     assert.equal((await post('/panel/chat', { csrf, message: 'hello' }, cookie)).status, 303)
     const page = await (await get('/panel', cookie)).text()
     assert.match(page, /Bot is not in the world/)
+  })
+})
+
+
+test('Crafty panel controls require login and CSRF and proxy bounded operations server-side', async () => {
+  const service = stubService()
+  await withPanel(service, async ({ get, post, crafty }) => {
+    assert.equal((await get('/panel/crafty/status.json')).status, 303)
+    const cookie = await signIn(post)
+    const csrf = await csrfOf(get, cookie)
+    const page = await (await get('/panel', cookie)).text()
+    for (const action of ['start', 'stop', 'restart']) assert.match(page, new RegExp(`action="/panel/crafty/${action}"`))
+    assert.match(page, /crafty-load-logs/)
+    assert.match(page, /crafty-command/)
+    const logs = await get('/panel/crafty/logs.json?limit=100', cookie)
+    assert.equal(logs.status, 200)
+    assert.deepEqual(await logs.json(), { status: 'ok', lines: ['hello'] })
+    assert.equal((await get('/panel/crafty/logs.json?limit=201', cookie)).status, 200)
+    assert.equal((await post('/panel/crafty/start', {}, cookie)).status, 403)
+    assert.equal((await post('/panel/crafty/start', { csrf }, cookie)).status, 303)
+    assert.equal((await post('/panel/crafty/stop', { csrf }, cookie)).status, 303)
+    assert.equal((await post('/panel/crafty/restart', { csrf }, cookie)).status, 303)
+    assert.equal((await post('/panel/crafty/command', { csrf, command: 'say hello' }, cookie)).status, 303)
+    assert.equal((await post('/panel/crafty/command', { csrf, command: 'say\nstop' }, cookie)).status, 303)
+    assert.deepEqual((await get('/panel/crafty/status.json', cookie)).status, 200)
   })
 })
 

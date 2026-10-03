@@ -39,7 +39,7 @@ function auditCrafty (req, action) {
 }
 
 function server (service, token, crafty = null) {
-  const handlePanel = panel(service, token)
+  const handlePanel = panel(service, token, crafty)
   return http.createServer(async (req, res) => {
     if (await handlePanel(req, res)) return
     if (!authorized(req, token)) return respond(res, 401, { error: 'Unauthorized' })

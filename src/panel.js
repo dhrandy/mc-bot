@@ -13,9 +13,9 @@ function esc (value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
 }
 
-function page (title, body) {
+function page (title, body, craftyEnabled = false) {
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-crafty="${craftyEnabled ? 'true' : 'false'}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -59,6 +59,13 @@ function page (title, body) {
   .topbar form { flex: 0 0 auto; }
   .topbar button { width: auto; padding: 6px 12px; font-size: 0.85rem; }
   .login { margin-top: 15vh; }
+  .crafty-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .crafty-actions form { min-width: 0; }
+  .crafty-actions .stop { background: #9a6a1e; }
+  .crafty-actions .restart { background: #6b5aa6; }
+  pre.logs { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #14181d; border-radius: 8px; padding: 10px; font: 0.8rem/1.45 ui-monospace, monospace; }
+  textarea { width: 100%; min-height: 90px; resize: vertical; padding: 10px; font: 16px/1.4 ui-monospace, monospace; background: #14181d; color: #e6e6e6; border: 1px solid #2d333b; border-radius: 8px; }
+  @media (max-width: 420px) { .crafty-actions { grid-template-columns: 1fr; } .topbar { align-items: flex-start; } }
 </style>
 </head>
 <body>
@@ -95,7 +102,7 @@ function formatHostiles (hostiles) {
   return hostiles.map(h => `${h.name} (${h.distance}m)`).join(', ')
 }
 
-function panelPage (service, csrf, flash) {
+function panelPage (service, csrf, flash, craftyEnabled) {
   const s = service.status()
   const field = (id, value) => `<dd id="${id}">${esc(value)}</dd>`
   const hidden = `<input type="hidden" name="csrf" value="${esc(csrf)}">`
@@ -135,6 +142,34 @@ ${flash ? `<p class="flash ${flash.ok ? 'ok' : 'err'}">${esc(flash.text)}</p>` :
     <button type="submit" class="${s.autoFlee ? 'warn' : ''}">${s.autoFlee ? 'Turn auto-flee off' : 'Turn auto-flee on (run from creepers)'}</button>
   </form>
 </div>
+${craftyEnabled ? `<details open>
+  <summary>Crafty server controls</summary>
+  <div class="card">
+    <dl class="status">
+      <dt>Server</dt><dd id="crafty-server-name">Loading...</dd>
+      <dt>State</dt><dd id="crafty-server-state">-</dd>
+      <dt>Players</dt><dd id="crafty-server-players">-</dd>
+      <dt>Version</dt><dd id="crafty-server-version">-</dd>
+    </dl>
+    <p class="muted">These controls apply to the Crafty server configured for this bot.</p>
+    <div class="crafty-actions">
+      <form method="post" action="/panel/crafty/start">${hidden}<button type="submit">Start server</button></form>
+      <form method="post" action="/panel/crafty/stop">${hidden}<button class="stop" type="submit">Stop server</button></form>
+      <form method="post" action="/panel/crafty/restart">${hidden}<button class="restart" type="submit">Restart server</button></form>
+    </div>
+  </div>
+  <div class="card">
+    <button type="button" id="crafty-load-logs">Load recent logs</button>
+    <pre class="logs" id="crafty-logs" aria-live="polite">Logs have not been loaded.</pre>
+  </div>
+  <form method="post" action="/panel/crafty/command">
+    ${hidden}
+    <label for="crafty-command">Console command</label>
+    <textarea id="crafty-command" name="command" maxlength="512" required spellcheck="false" placeholder="list"></textarea>
+    <p class="muted">One line, up to 512 characters. Console commands can change the world.</p>
+    <p><button type="submit" onclick="return confirm('Send this command to the configured Minecraft server console?')">Send console command</button></p>
+  </form>
+</details>` : ''}
 <details>
   <summary>Chat</summary>
   <form method="post" action="/panel/chat">
@@ -191,10 +226,10 @@ ${flash ? `<p class="flash ${flash.ok ? 'ok' : 'err'}">${esc(flash.text)}</p>` :
   </form>
 </details>
 <p class="muted">Status updates itself every few seconds when scripts are allowed; reload the page otherwise.</p>
-<script src="/panel/app.js"></script>`)
+<script src="/panel/app.js"></script>`, craftyEnabled)
 }
 
-const appJs = `async function tick () {
+const appJs = `const craftyEnabled = document.documentElement.dataset.crafty === 'true'\nasync function tick () {
   try {
     const response = await fetch('/panel/status.json', { credentials: 'same-origin' })
     if (response.status === 401) { window.location.href = '/login'; return }
@@ -210,12 +245,39 @@ const appJs = `async function tick () {
     set('s-hostiles', s.nearbyHostiles && s.nearbyHostiles.length ? s.nearbyHostiles.map(h => h.name + ' (' + h.distance + 'm)').join(', ') : 'none nearby')
     set('s-flee', s.autoFlee ? 'on' : 'off')
     set('s-error', s.lastError || 'none')
+    if (craftyEnabled) await tickCraftyStatus()
   } catch (error) { /* keep the last good values on screen */ }
 }
+async function tickCraftyStatus () {
+  try {
+    const response = await fetch('/panel/crafty/status.json', { credentials: 'same-origin' })
+    if (!response.ok) return
+    const result = await response.json()
+    const server = result.server || {}
+    const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value }
+    set('crafty-server-name', server.name || 'Configured server')
+    set('crafty-server-state', server.running === true ? 'Running' : server.running === false ? (server.crashed ? 'Crashed' : 'Stopped') : 'Unknown')
+    set('crafty-server-players', server.online == null ? '-' : server.online + (server.max == null ? '' : ' / ' + server.max))
+    set('crafty-server-version', server.version || '-')
+  } catch (error) { /* keep the last good values on screen */ }
+}
+async function loadCraftyLogs () {
+  const output = document.getElementById('crafty-logs')
+  if (!output) return
+  output.textContent = 'Loading logs...'
+  try {
+    const response = await fetch('/panel/crafty/logs.json?limit=100', { credentials: 'same-origin' })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error || 'Could not load logs')
+    output.textContent = result.lines.join('\\n') || 'No log lines returned.'
+  } catch (error) { output.textContent = error.message || 'Could not load logs.' }
+}
+document.getElementById('crafty-load-logs')?.addEventListener('click', loadCraftyLogs)
+if (craftyEnabled) tickCraftyStatus()
 setInterval(tick, 5000)
 `
 
-function panel (service, token) {
+function panel (service, token, crafty = null) {
   const secret = crypto.randomBytes(32)
   const sessions = new Map()
   const attempts = new Map()
@@ -331,6 +393,11 @@ function panel (service, token) {
     if (attempts.size > 1000) attempts.clear()
   }
 
+  function auditCrafty (action) {
+    const caller = crypto.createHash('sha256').update(token).digest('hex').slice(0, 12)
+    console.info('Crafty panel control:', JSON.stringify({ at: new Date().toISOString(), action, caller }))
+  }
+
   function correctPassword (password) {
     if (typeof password !== 'string') return false
     const a = Buffer.from(password)
@@ -338,7 +405,7 @@ function panel (service, token) {
     return a.length === b.length && crypto.timingSafeEqual(a, b)
   }
 
-  async function runAction (name, fields) {
+  async function runAction (name, fields, crafty) {
     switch (name) {
       case 'join':
         service.join()
@@ -384,6 +451,21 @@ function panel (service, token) {
         await service.shelter(material, coords)
         return `Shelter built at ${coords.x}, ${coords.y}, ${coords.z}`
       }
+      case 'crafty/start':
+      case 'crafty/stop':
+      case 'crafty/restart': {
+        if (!crafty) throw bad('Crafty integration is not configured', 503)
+        const action = name.slice('crafty/'.length)
+        auditCrafty(action)
+        await crafty.action(`${action}_server`)
+        return `Crafty server ${action} request sent`
+      }
+      case 'crafty/command': {
+        if (!crafty) throw bad('Crafty integration is not configured', 503)
+        auditCrafty('command')
+        await crafty.command(fields.command)
+        return 'Console command sent to Crafty server'
+      }
       case 'auto-flee': {
         if (!['true', 'false'].includes(fields.enabled)) throw bad('Expected enabled true or false')
         const result = service.setAutoFlee(fields.enabled === 'true')
@@ -424,7 +506,7 @@ function panel (service, token) {
       if (req.method === 'GET' && path === '/panel') {
         const flash = auth.session.flash
         auth.session.flash = null
-        return html(res, 200, panelPage(service, auth.session.csrf, flash)), true
+        return html(res, 200, panelPage(service, auth.session.csrf, flash, Boolean(crafty))), true
       }
       if (req.method === 'GET' && path === '/panel/app.js') {
         res.writeHead(200, {
@@ -437,6 +519,15 @@ function panel (service, token) {
         return true
       }
       if (req.method === 'GET' && path === '/panel/status.json') return json(res, 200, service.status()), true
+      if (req.method === 'GET' && path === '/panel/crafty/status.json') {
+        if (!crafty) return json(res, 503, { error: 'Crafty integration is not configured' }), true
+        return json(res, 200, await crafty.status()), true
+      }
+      if (req.method === 'GET' && path === '/panel/crafty/logs.json') {
+        if (!crafty) return json(res, 503, { error: 'Crafty integration is not configured' }), true
+        const rawLimit = new URL(req.url, 'http://localhost').searchParams.get('limit')
+        return json(res, 200, await crafty.logs(rawLimit == null ? 100 : Number(rawLimit))), true
+      }
       if (req.method === 'POST' && path === '/logout') {
         const fields = await formBody(req)
         checkCsrf(auth.session, fields)
@@ -448,7 +539,7 @@ function panel (service, token) {
         const fields = await formBody(req)
         checkCsrf(auth.session, fields)
         try {
-          const text = await runAction(path.slice('/panel/'.length), fields)
+          const text = await runAction(path.slice('/panel/'.length), fields, crafty)
           auth.session.flash = { ok: true, text }
         } catch (error) {
           auth.session.flash = { ok: false, text: error.status ? error.message : 'Something went wrong' }
