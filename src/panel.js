@@ -169,7 +169,7 @@ ${flash ? `<p class="flash ${flash.ok ? 'ok' : 'err'}">${esc(flash.text)}</p>` :
     ${hidden}
     <input id="survive-enabled" type="hidden" name="enabled" value="${s.survival?.enabled ? 'false' : 'true'}">
     <button id="survive-toggle" type="submit" class="${s.survival?.enabled ? 'warn' : ''}">${s.survival?.enabled ? 'Disable Survive and quit' : 'Survive (automatic starter tasks)'}</button>
-    <p class="muted">Opt-in. Eats inventory food, handles known hostiles, gathers reachable wood, crafts tools and shelters at night. Leaves when blocked or out of work. May change nearby terrain. No food foraging or long-range exploration. Enable only in an area you permit it to change.</p>
+    <p class="muted">Opt-in. Eats inventory food, handles known hostiles, gathers reachable wood, crafts tools and shelters at night. Searches nearby for work; waits and reports when safe search is blocked. Safety exits still apply. May change nearby terrain. No food foraging or long-range exploration. Enable only in an area you permit it to change.</p>
   </form>
 </div>
 ${craftyEnabled ? `<details open>
@@ -551,8 +551,10 @@ function panel (service, token, crafty = null) {
       }
       case 'survive': {
         if (!['true', 'false'].includes(fields.enabled)) throw bad('Expected enabled true or false')
-        const result = service.setSurvive(fields.enabled === 'true')
-        return result.enabled ? 'Survive enabled: automatic starter tasks' : 'Survive disabled; bot left the game'
+        const enabling = fields.enabled === 'true'
+        const result = service.setSurvive(enabling)
+        if (!enabling) return 'Survive disabled; bot left the game'
+        return result.enabled ? 'Survive enabled: automatic starter tasks' : 'Survive checked the world and quit: ' + result.reason
       }
       case 'auto-flee': {
         if (!['true', 'false'].includes(fields.enabled)) throw bad('Expected enabled true or false')

@@ -47,14 +47,14 @@ test('Survive defaults off, cannot enable offline and disables destructive path 
   assert.equal(mode.state.enabled, false)
 })
 
-test('no reachable wood quits instead of idle or reconnect loop', async () => {
-  const { service, mode, bot, calls, start } = fixture()
-  start()
+test('no reachable wood searches an inspected corridor instead of quitting', async () => {
+  const { service, mode, bot, start } = fixture(); start()
+  mode.searchOrigin = bot.entity.position.floored()
+  service.goto = (x, y, z) => { service.navigation = { state: 'arrived' }; bot.entity.position = new Vec3(x + 0.5, y, z + 0.5) }
   await mode.tick(bot)
-  assert.equal(service.state, 'disconnected')
-  assert.equal(mode.state.goal, 'quit')
-  assert.match(mode.state.reason, /No reachable natural tree/)
-  assert.deepEqual(calls, [['quit']])
+  assert.equal(service.state, 'online')
+  assert.equal(mode.state.goal, 'searching')
+  assert.equal(mode.visited.size, 1)
 })
 
 test('safe inventory food is used, hunger without food quits', async () => {
@@ -182,13 +182,39 @@ test('failed craft disconnects with visible reason and does not retry', async ()
   assert.equal(mode.state.error, 'Protected or missing recipe')
 })
 
-test('unknown time and finite work budget leave before more world changes', async () => {
-  for (const reason of ['time', 'budget']) {
-    const { service, mode, bot, calls, start } = fixture(); start()
-    if (reason === 'time') bot.time = null
-    else mode.steps = 120
-    await mode.tick(bot)
-    assert.equal(service.state, 'disconnected')
-    assert.deepEqual(calls, [['quit']])
-  }
+test('unknown world time is a safety failure, not a soft idle state', async () => {
+  const { service, mode, bot, calls, start } = fixture(); start()
+  bot.time = null
+  await mode.tick(bot)
+  assert.equal(service.state, 'disconnected')
+  assert.deepEqual(calls, [['quit']])
+})
+
+test('bounded search refuses hazards, player corridors and radius overflow', () => {
+  const { searchStep } = require('../src/survival-mode')
+  const { bot, put } = fixture()
+  const origin = bot.entity.position.floored()
+  assert.ok(searchStep(bot, origin, new Set()))
+  assert.equal(searchStep(bot, origin, new Set(), 2), null)
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) put(origin.offset(dx, -1, dz), 'lava')
+  assert.equal(searchStep(bot, origin, new Set()), null)
+})
+
+test('search blocked does not quit or make blind movement', async () => {
+  const { service, mode, bot, start, put } = fixture(); start()
+  const feet = bot.entity.position.floored()
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) put(feet.offset(dx, -1, dz), 'lava')
+  await mode.tick(bot)
+  assert.equal(service.state, 'online')
+  assert.equal(mode.state.goal, 'search-blocked')
+})
+
+test('soft blocked search remains connected beyond the former turn budget', async () => {
+  const { service, mode, bot, start, put } = fixture(); start()
+  const feet = bot.entity.position.floored()
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) put(feet.offset(dx, -1, dz), 'lava')
+  for (let turn = 0; turn < 150; turn++) await mode.tick(bot)
+  assert.equal(service.state, 'online')
+  assert.equal(mode.state.enabled, true)
+  assert.equal(mode.state.goal, 'search-blocked')
 })

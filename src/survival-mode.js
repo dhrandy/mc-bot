@@ -40,6 +40,31 @@ function escapeTarget (bot, threat) {
   return candidates[0] || null
 }
 
+// Expand work search through loaded, flat corridors only. No blind roaming.
+function searchStep (bot, origin, visited, radius = 16) {
+  const feet = bot.entity.position.floored()
+  const options = []
+  for (const [dx, dz] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+    const end = feet.offset(dx * 3, 0, dz * 3)
+    if (distance(end, origin) > radius || visited.has(end.toString())) continue
+    let clear = true
+    for (let step = 1; step <= 3; step++) {
+      const pos = feet.offset(dx * step, 0, dz * step)
+      if (!safeStanding(bot, pos)) { clear = false; break }
+      for (const [sx, sz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const side = bot.blockAt(pos.offset(sx, 0, sz))
+        const floor = bot.blockAt(pos.offset(sx, -1, sz))
+        if (!side || !floor || HAZARD.test(side.name) || HAZARD.test(floor.name)) { clear = false; break }
+      }
+      if (Object.values(bot.entities || {}).some(entity => entity.position && entity.type === 'player' && distance(pos, entity.position) < 2)) clear = false
+      if (!clear) break
+    }
+    if (clear) options.push(end)
+  }
+  options.sort((a, b) => distance(a, origin) - distance(b, origin))
+  return options[0] || null
+}
+
 function shelterPlan (feet) {
   const blocks = []
   for (let y = 0; y <= 1; y++) {
@@ -71,9 +96,9 @@ class SurvivalMode {
     this.timer = null
     this.busy = false
     this.generation = 0
-    this.startedAt = 0
-    this.steps = 0
     this.lastHit = 0
+    this.searchOrigin = null
+    this.visited = new Set()
     this.state = { enabled: false, goal: 'off', reason: 'Enable Survive after joining', error: null }
   }
 
@@ -92,8 +117,8 @@ class SurvivalMode {
     // Autonomous travel must never dig a route through terrain or builds.
     if (bot.pathfinder.movements) bot.pathfinder.movements.canDig = false
     this.generation++
-    this.steps = 0
-    this.startedAt = Date.now()
+    this.searchOrigin = bot.entity.position.floored()
+    this.visited = new Set([this.searchOrigin.toString()])
     this.state.enabled = true
     this.describe('starting', 'Checking threats, food and nearby materials', { error: null })
     this.timer = setInterval(() => this.tick(bot), 1000)
@@ -140,10 +165,6 @@ class SurvivalMode {
     const threat = selectThreat(bot)
     if (this.busy) {
       if (threat && distance(bot.entity.position, threat.position) <= 4) this.leave('Hostile interrupted a world action; leaving safely')
-      return
-    }
-    if (++this.steps > 120 || Date.now() - this.startedAt > 10 * 60 * 1000) {
-      this.leave('Starter survival work budget reached; leaving instead of staying unattended')
       return
     }
     this.busy = true
@@ -255,18 +276,36 @@ class SurvivalMode {
       }
       if (needsTools || !material) {
         const log = bot.findBlock({ matching: block => LOG.test(block.name), maxDistance: 4.5, useExtraInfo: true })
-        if (!log) { this.leave('No reachable natural tree for the remaining work; leaving instead of idling'); return }
+        if (!log) {
+          const target = searchStep(bot, this.searchOrigin || bot.entity.position.floored(), this.visited)
+          if (!target) {
+            this.describe('search-blocked', 'No unvisited safe loaded corridor within 16 blocks; staying connected, waiting for a changed world or manual Stop')
+            return
+          }
+          this.visited.add(target.toString())
+          this.describe('searching', 'Looking for reachable natural wood through an inspected three-block corridor', { target: point(target) })
+          service.goto(target.x, target.y, target.z)
+          await this.bounded(bot, () => new Promise((resolve, reject) => {
+            const check = setInterval(() => {
+              if (!active()) { clearInterval(check); resolve(); return }
+              if (service.navigation?.state === 'arrived') { clearInterval(check); resolve() }
+              else if (service.navigation?.state === 'failed') { clearInterval(check); reject(new Error(service.navigation.error)) }
+            }, 200)
+            check.unref?.()
+          }), active)
+          return
+        }
         this.describe('gathering', 'Gathering one reachable leafy log; existing protection checks apply', { target: point(log.position) })
         const before = bot.inventory.items().reduce((n, item) => n + item.count, 0)
         await this.bounded(bot, () => service.gather(point(log.position)), active)
         if (active() && bot.inventory.items().reduce((n, item) => n + item.count, 0) <= before) this.leave('Gathered block but pickup was not confirmed; stopping rather than stripping more trees')
         return
       }
-      this.leave('Basic tools and shelter stock ready; no further task, so leaving the game')
+      this.describe('ready', 'Basic tools and shelter stock ready; staying connected until night, food need, danger or manual Stop')
     } catch (error) {
       if (active()) this.leave('Survival work blocked; leaving instead of retrying destructive actions', String(error.message || error).slice(0, 180))
     } finally { this.busy = false }
   }
 }
 
-module.exports = { SurvivalMode, safeStanding, escapeTarget, shelterPlan, checkShelter }
+module.exports = { SurvivalMode, safeStanding, escapeTarget, shelterPlan, checkShelter, searchStep }

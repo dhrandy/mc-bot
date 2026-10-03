@@ -282,3 +282,16 @@ test('Survive panel action is session/CSRF protected with strict booleans', asyn
     assert.match(await (await get('/panel', cookie)).text(), /Disable Survive before manual controls/)
   })
 })
+
+test('immediate survival idle-quit is reported as an enable result, not a disable', async () => {
+  const service = stubService()
+  service.setSurvive = () => ({ enabled: false, goal: 'quit', reason: 'No reachable natural tree' })
+  await withPanel(service, async ({ get, post }) => {
+    const cookie = await signIn(post)
+    const csrf = await csrfOf(get, cookie)
+    await post('/panel/survive', { csrf, enabled: 'true' }, cookie)
+    const html = await (await get('/panel', cookie)).text()
+    assert.match(html, /Survive checked the world and quit: No reachable natural tree/)
+    assert.doesNotMatch(html, /Survive disabled; bot left the game/)
+  })
+})
