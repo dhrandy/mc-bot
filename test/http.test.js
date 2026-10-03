@@ -63,3 +63,83 @@ test('follow, stop, and look route through the bot without sending commands', as
   assert.deepEqual([lookTarget.x, lookTarget.y, lookTarget.z], [1, 65, 2])
   assert.throws(() => service.follow('Absent'), { status: 404 })
 })
+
+test('Crafty routes require bot API auth and stay disabled without config', async () => {
+  const app = server(new BotService({}), 'test-token-abcdefghijklmnopqrstuvwxyz')
+  await new Promise(resolve => app.listen(0, '127.0.0.1', resolve))
+  try {
+    const url = `http://127.0.0.1:${app.address().port}/api/crafty/status`
+    assert.equal((await fetch(url)).status, 401)
+    const response = await fetch(url, { headers: { authorization: 'Bearer test-token-abcdefghijklmnopqrstuvwxyz' } })
+    assert.equal(response.status, 503)
+    assert.deepEqual(await response.json(), { error: 'Crafty integration is not configured' })
+  } finally { app.close() }
+})
+
+test('Crafty routes proxy status, capped logs and actions with existing API auth', async () => {
+  const calls = []
+  const crafty = {
+    async status () { calls.push(['status']); return { status: 'ok', server: { running: true } } },
+    async logs (limit) { if (limit > 200) throw Object.assign(new Error('limit invalid'), { status: 400 }); calls.push(['logs', limit]); return { status: 'ok', lines: ['line'] } },
+    async action (name) { calls.push(['action', name]); return { status: 'ok' } },
+    async command (command) { if (/[\r\n\0]/.test(command)) throw Object.assign(new Error('bad command'), { status: 400 }); calls.push(['command', command]); return { status: 'ok' } }
+  }
+  const app = server(new BotService({}), 'test-token-abcdefghijklmnopqrstuvwxyz', crafty)
+  await new Promise(resolve => app.listen(0, '127.0.0.1', resolve))
+  try {
+    const base = `http://127.0.0.1:${app.address().port}`
+    const headers = { authorization: 'Bearer test-token-abcdefghijklmnopqrstuvwxyz', 'content-type': 'application/json' }
+    assert.deepEqual(await (await fetch(base + '/api/crafty/status', { headers })).json(), { status: 'ok', server: { running: true } })
+    assert.equal((await fetch(base + '/api/crafty/logs?limit=30', { headers })).status, 200)
+    assert.equal((await fetch(base + '/api/crafty/logs?limit=201', { headers })).status, 400)
+    assert.equal((await fetch(base + '/api/crafty/action/restart', { method: 'POST', headers })).status, 200)
+    assert.equal((await fetch(base + '/api/crafty/command', { method: 'POST', headers, body: JSON.stringify({ command: 'list' }) })).status, 200)
+    assert.equal((await fetch(base + '/api/crafty/command', { method: 'POST', headers, body: JSON.stringify({ command: 'say\nhello' }) })).status, 400)
+    assert.deepEqual(calls, [['status'], ['logs', 30], ['action', 'restart_server'], ['command', 'list']])
+  } finally { app.close() }
+})
+
+const { CraftyClient } = require('../src/crafty')
+
+test('Crafty client attaches token only as auth and redacts it from responses', async () => {
+  const token = 'crafty-secret-test-not-real'
+  const seen = []
+  const client = new CraftyClient({
+    baseUrl: 'https://crafty.example.test/', serverId: 'server-id', token,
+    fetchImpl: async (url, options) => {
+      seen.push([url, options])
+      const payload = url.endsWith('/stats')
+        ? { status: 'ok', data: { server_name: `received ${token}`, server_id: { server_name: 'World' } }, running: true, online: 1, max: 10 }
+        : { status: 'ok' }
+      return new Response(JSON.stringify(payload), { status: 200 })
+    }
+  })
+  const status = await client.status()
+  assert.equal(status.server.name, 'received [redacted]')
+  assert.equal(status.server.running, true)
+  assert.equal(status.server.online, 1)
+  assert.equal(seen[0][0], 'https://crafty.example.test/api/v2/servers/server-id/stats')
+  assert.equal(seen[0][1].headers.Authorization, `Bearer ${token}`)
+  assert.equal(JSON.stringify(status).includes(token), false)
+  await client.command('list')
+  assert.equal(seen[1][0], 'https://crafty.example.test/api/v2/servers/server-id/stdin')
+  assert.equal(seen[1][1].body, 'list')
+  assert.equal(seen[1][1].headers['Content-Type'], 'text/plain; charset=utf-8')
+})
+
+test('Crafty client validates URL, commands, and log limits; errors do not echo token', async () => {
+  const token = 'crafty-secret-test-not-real'
+  assert.throws(() => new CraftyClient({ baseUrl: 'http://crafty.example.test', serverId: 'id', token }), /HTTPS/)
+  const client = new CraftyClient({
+    baseUrl: 'https://crafty.example.test', serverId: 'id', token,
+    fetchImpl: async () => new Response(JSON.stringify({ status: 'ok', data: Array.from({ length: 250 }, (_, i) => `line-${i}`) }), { status: 200 })
+  })
+  await assert.rejects(client.command(`say ${token}\n`), { status: 400 })
+  await assert.rejects(client.command(`say ${token}`), { status: 400 })
+  assert.throws(() => new CraftyClient({ baseUrl: 'https://user:pass@crafty.example.test', serverId: 'id', token }), /credentials/)
+  await assert.rejects(client.logs(0), { status: 400 })
+  await assert.rejects(client.logs(201), { status: 400 })
+  assert.deepEqual((await client.logs(2)).lines, ['line-248', 'line-249'])
+  const failing = new CraftyClient({ baseUrl: 'https://crafty.example.test', serverId: 'id', token, fetchImpl: async () => { throw new Error(`Oops ${token}`) } })
+  await assert.rejects(failing.status(), error => !error.message.includes(token) && error.message === 'Crafty API request failed')
+})

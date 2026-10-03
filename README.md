@@ -15,6 +15,9 @@ MC_VERSION=
 MC_ACCOUNT_ID=bot-account-alias
 API_PORT=42883
 API_TOKEN=replace-with-a-random-secret-at-least-32-characters
+CRAFTY_API_BASE_URL=
+CRAFTY_SERVER_ID=
+CRAFTY_API_TOKEN=
 AUTO_DEFEND=false
 AUTO_EAT=false
 AUTO_JOIN=false
@@ -29,6 +32,9 @@ AUTO_FLEE=false
 | `MC_ACCOUNT_ID` | Stable Microsoft login cache identifier |
 | `API_PORT` | Host port for the private control API |
 | `API_TOKEN` | Random bearer secret, at least 32 characters |
+| `CRAFTY_API_BASE_URL` | Optional Crafty Controller URL (HTTPS required except localhost) |
+| `CRAFTY_SERVER_ID` | Optional server ID in Crafty |
+| `CRAFTY_API_TOKEN` | Optional Crafty bearer token; keep it only in the server environment, never in this repo or logs |
 | `AUTO_DEFEND` | `false` by default; opt in to bounded mob defense after damage and creeper avoidance |
 | `AUTO_EAT` | `false` by default; opt in to safe food selection from inventory when food is 14 or below |
 | `AUTO_JOIN` | `false` by default; the bot stays offline until Join on the panel or `POST /api/join`. Set `true` to join when the container starts |
@@ -50,6 +56,9 @@ services:
       MC_VERSION: ${MC_VERSION}
       MC_ACCOUNT_ID: ${MC_ACCOUNT_ID}
       API_TOKEN: ${API_TOKEN}
+      CRAFTY_API_BASE_URL: ${CRAFTY_API_BASE_URL}
+      CRAFTY_SERVER_ID: ${CRAFTY_SERVER_ID}
+      CRAFTY_API_TOKEN: ${CRAFTY_API_TOKEN}
       AUTO_DEFEND: ${AUTO_DEFEND}
       AUTO_EAT: ${AUTO_EAT}
       AUTO_JOIN: ${AUTO_JOIN}
@@ -78,11 +87,17 @@ The panel shows state, player name, health, food, position, nearby hostiles, aut
 
 ## API
 
-All API routes require `Authorization: Bearer <API_TOKEN>`, including reads. The control panel uses its own sign-in instead. JSON responses have a no-crawl header. Body size is limited to 4 KB; chat is capped at 256 characters and recent chat is kept in memory only (last 100, reads return 50). The API deliberately has no raw server-command endpoint.
+All API routes require `Authorization: Bearer <API_TOKEN>`, including reads. The control panel uses its own sign-in instead. JSON responses have a no-crawl header. Body size is limited to 4 KB; chat is capped at 256 characters and recent chat is kept in memory only (last 100, reads return 50). Crafty Controller actions are optional and separately scoped to the configured Crafty server. When enabled, the API can also send raw server-console commands; treat these routes as highly privileged.
 
 | Method | Path | Body | Result |
 | --- | --- | --- | --- |
 | GET | `/api/status` | none | connection state, username, position, health, food, inventory slots, navigation progress, nearby threat IDs, defense action, auto-eat state/error, last error |
+| GET | `/api/crafty/status` | none | normalized status for the configured Crafty server (optional; requires Crafty variables below) |
+| GET | `/api/crafty/logs?limit=100` | none | most recent stdout lines; limit 1-200 (optional) |
+| POST | `/api/crafty/action/start` | empty | start the configured Crafty server |
+| POST | `/api/crafty/action/stop` | empty | stop the configured Crafty server |
+| POST | `/api/crafty/action/restart` | empty | restart the configured Crafty server |
+| POST | `/api/crafty/command` | `{"command":"list"}` | send one line to the configured server console (max 512 characters; no leading slash or line breaks) |
 | GET | `/api/chat` | none | recent chat |
 | POST | `/api/chat` | `{"message":"Hello"}` | send public chat |
 | POST | `/api/follow` | `{"player":"PlayerName"}` | follow a nearby visible player |
@@ -116,6 +131,22 @@ curl -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:42883/api/status
 curl -X POST -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
   -d '{"player":"PlayerName"}' http://127.0.0.1:42883/api/follow
 ```
+
+### Optional Crafty Controller integration
+
+Set all three Crafty variables to enable server status, recent logs, start/stop/restart, and console-command routes. Leave all three blank to disable them. Use a dedicated Crafty token with only the command and log/status permissions these operations require. `CRAFTY_API_TOKEN` is sent only as an HTTPS bearer header from mc-bot to Crafty. It is never written into repository files, application logs, or API responses. Crafty response text is also scrubbed for the configured token before it can be returned. The integration does not expose a web-panel control for these operations. Every route still requires mc-bot's existing `API_TOKEN`; use that token only on a trusted private network.
+
+The console-command route is powerful: a command can change or delete Minecraft world data. Send commands only when you intend a Crafty console action. The configured server ID and base URL are deployment settings, not compiled defaults.
+
+Paste-ready Compose variables (replace the examples and keep real secrets in the deployment environment):
+
+```yaml
+CRAFTY_API_BASE_URL: ${CRAFTY_API_BASE_URL}
+CRAFTY_SERVER_ID: ${CRAFTY_SERVER_ID}
+CRAFTY_API_TOKEN: ${CRAFTY_API_TOKEN}
+```
+
+The matching `.env` entries use the same names. For Dockhand, fill them in its Environment tab. Do not put Randy's actual Crafty host, server ID, or token in a public commit. Endpoints follow the [Crafty Controller API v2](https://docs.craftycontrol.com/pages/developer-guide/api-reference/v2/) reference.
 
 The port is bound to loopback in the default Compose. To call it from a different device or cloud-based assistant, first set up a private network route. The bot will retry failed connections with backoff up to 60 seconds. API status can show `connecting` or `offline` while it retries. A `goto` may fail after its `202` response if it cannot pathfind to the destination. Poll `GET /api/status` for `navigation.state` (`moving`, `arrived`, `failed`, or `following`) and the action ID. A newer navigation command or stop cancels the earlier goal. Since 0.7.2, Go To a lower target first checks for supporting leaves across the player's footprint. It punches them bare-handed only when every support is a leaf, the loaded landing is within a three-block drop, and visible liquids, hazards and nearby players are absent. It waits for each landing before another dig (at most eight steps), then resumes pathfinding. This does not bypass spawn or region protection. Refused/unconfirmed digs and a 15-second movement stall fail visibly instead of reporting endless walking. `navigation.phase`, `pathStatus`, `pathLength`, `resetReason` and `onGround` provide diagnostics; container logs record the leaf and landing steps. No teleport, operator permission or creative mode is used. A failed connection records the reason in logs and `lastError` before retrying; an intentional disconnect does not retry. Pathfinder gives water a higher cost, disables sprinting, building, towers, and unlimited drops into water. It can dig through leaves, grass and common natural terrain in its way, with drops limited to three blocks. Containers, logs, planks, controls and other non-terrain blocks are excluded from path digging; liquid-flow and falling-block checks stay enabled. Digging changes the world, and natural terrain can also be part of a player build, so choose routes away from valuable structures. It may still choose water when there is no land path. Jump and swim are distinct calls: in Mineflayer the swim-up input uses the same jump control state, with optional forward movement. Face shore with `/api/look`, then swim forward if needed. Both controls are time-limited; `/api/stop` releases them early. They are not a guaranteed fix for every waterline or Minecraft physics bug. `/api/stop` stops a following goal but cannot instantly undo a chat or movement already sent.
 

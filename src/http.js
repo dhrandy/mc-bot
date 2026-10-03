@@ -1,5 +1,5 @@
 const http = require('node:http')
-const { timingSafeEqual } = require('node:crypto')
+const { timingSafeEqual, createHash } = require('node:crypto')
 const { bad, stringField, coordinates, blockCoordinates, materialName } = require('./validate')
 const { panel } = require('./panel')
 
@@ -33,13 +33,38 @@ async function body (req) {
   try { return JSON.parse(input) } catch { throw bad('Invalid JSON') }
 }
 
-function server (service, token) {
+function auditCrafty (req, action) {
+  const caller = createHash('sha256').update(req.headers.authorization.slice(7)).digest('hex').slice(0, 12)
+  console.info('Crafty control:', JSON.stringify({ at: new Date().toISOString(), action, caller }))
+}
+
+function server (service, token, crafty = null) {
   const handlePanel = panel(service, token)
   return http.createServer(async (req, res) => {
     if (await handlePanel(req, res)) return
     if (!authorized(req, token)) return respond(res, 401, { error: 'Unauthorized' })
     try {
       const path = new URL(req.url, 'http://localhost').pathname
+      if (path.startsWith('/api/crafty/')) {
+        if (!crafty) return respond(res, 503, { error: 'Crafty integration is not configured' })
+        if (req.method === 'GET' && path === '/api/crafty/status') return respond(res, 200, await crafty.status())
+        if (req.method === 'GET' && path === '/api/crafty/logs') {
+          const rawLimit = new URL(req.url, 'http://localhost').searchParams.get('limit')
+          const limit = rawLimit == null ? 100 : Number(rawLimit)
+          return respond(res, 200, await crafty.logs(limit))
+        }
+        if (req.method === 'POST' && /^\/api\/crafty\/action\/(start|stop|restart)$/.test(path)) {
+          const action = path.split('/').pop()
+          auditCrafty(req, action)
+          return respond(res, 200, await crafty.action(`${action}_server`))
+        }
+        if (req.method === 'POST' && path === '/api/crafty/command') {
+          const { command } = await body(req)
+          auditCrafty(req, 'command')
+          return respond(res, 200, await crafty.command(command))
+        }
+        return respond(res, 404, { error: 'Not found' })
+      }
       if (req.method === 'GET' && path === '/api/status') return respond(res, 200, service.status())
       if (req.method === 'GET' && path === '/api/chat') return respond(res, 200, { messages: service.messages.slice(-50) })
       if (req.method === 'POST' && path === '/api/chat') {
@@ -121,8 +146,9 @@ function server (service, token) {
       if (req.method === 'POST' && path === '/api/stop') return respond(res, 200, service.stop())
       respond(res, 404, { error: 'Not found' })
     } catch (error) {
-      respond(res, error.status || 500, { error: error.status ? error.message : 'Internal error' })
-      if (!error.status) console.error('API error:', error)
+      const clientError = error.status === 400
+      respond(res, clientError ? 400 : (error.status || 500), { error: error.status ? error.message : 'Internal error' })
+      if (!error.status) console.error('API error:', String(error.message || error).slice(0, 200))
     }
   })
 }

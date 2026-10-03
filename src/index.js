@@ -1,5 +1,6 @@
 const { BotService } = require('./service')
 const { server } = require('./http')
+const { CraftyClient } = require('./crafty')
 
 const mcHost = process.env.MC_HOST
 const mcAccountId = process.env.MC_ACCOUNT_ID
@@ -17,8 +18,15 @@ for (const flag of flags) {
     process.exit(1)
   }
 }
+const craftyValues = ['CRAFTY_API_TOKEN', 'CRAFTY_API_BASE_URL', 'CRAFTY_SERVER_ID'].map(key => process.env[key] || '')
+const craftyConfigured = craftyValues.some(Boolean)
+if (craftyConfigured && craftyValues.some(value => !value)) {
+  console.error('Set all of CRAFTY_API_TOKEN, CRAFTY_API_BASE_URL, and CRAFTY_SERVER_ID to enable Crafty controls')
+  process.exit(1)
+}
+const crafty = craftyConfigured ? new CraftyClient({ baseUrl: process.env.CRAFTY_API_BASE_URL, serverId: process.env.CRAFTY_SERVER_ID, token: process.env.CRAFTY_API_TOKEN }) : null
 const bot = new BotService({ mcHost, mcPort, mcAccountId, mcVersion: process.env.MC_VERSION || undefined, cacheDir: process.env.AUTH_CACHE_DIR || '/data/auth', autoDefend: process.env.AUTO_DEFEND === 'true', autoEat: process.env.AUTO_EAT === 'true', autoFlee: process.env.AUTO_FLEE === 'true' })
-const httpServer = server(bot, apiToken)
+const httpServer = server(bot, apiToken, crafty)
 httpServer.listen(apiPort, process.env.API_BIND || '0.0.0.0', () => {
   console.log(`Control API listening on port ${apiPort}`)
   if (process.env.AUTO_JOIN === 'true') {
