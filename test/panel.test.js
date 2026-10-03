@@ -230,3 +230,36 @@ test('Jump is a session and CSRF protected real form with a fixed duration', asy
     assert.match(await (await get('/panel', cookie)).text(), /Bot is not in the world/)
   })
 })
+
+test('incoming chat requires a session, bounds history and renders hostile text safely', async () => {
+  const service = stubService()
+  const attack = '<img src=x onerror="alert(1)"><script>alert(2)</script>'
+  service.messages = Array.from({ length: 100 }, (_, i) => ({ at: '2026-01-01T00:00:00.000Z', message: `line ${i}`, sender: 'not-public', position: 'chat' }))
+  service.messages[99].message = attack
+  await withPanel(service, async ({ get, post }) => {
+    assert.equal((await get('/panel/chat.json')).status, 303)
+    assert.equal((await get('/panel/chat.json', 'mcb_session=forged.invalid')).status, 303)
+    const cookie = await signIn(post)
+    const response = await get('/panel/chat.json', cookie)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    const { messages } = await response.json()
+    assert.equal(messages.length, 50)
+    assert.deepEqual(messages[0], { at: '2026-01-01T00:00:00.000Z', message: 'line 50' })
+    assert.equal(messages[49].message, attack)
+    const html = await (await get('/panel', cookie)).text()
+    assert.ok(html.includes('&lt;img'))
+    assert.ok(!html.includes(attack))
+    assert.ok(html.indexOf('id="chat-history"') < html.indexOf('id="message"'))
+    const script = await (await get('/panel/app.js', cookie)).text()
+    new (require('node:vm').Script)(script)
+    assert.match(script, /output\.textContent = text/)
+    assert.doesNotMatch(script, /innerHTML/)
+    assert.match(script, /set\('s-navigation', formatNavigation/)
+    assert.match(script, /setTimeout\(refresh, 5000\)/)
+    service.messages = []
+    assert.match(await (await get('/panel', cookie)).text(), /No chat received yet/)
+    service.messages.push({ at: '2026-01-01T00:00:01.000Z', message: 'new live message' })
+    assert.equal((await (await get('/panel/chat.json', cookie)).json()).messages[0].message, 'new live message')
+  })
+})

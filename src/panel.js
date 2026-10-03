@@ -65,6 +65,7 @@ function page (title, body, craftyEnabled = false) {
   .crafty-actions .stop { background: #9a6a1e; }
   .crafty-actions .restart { background: #6b5aa6; }
   pre.logs { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #14181d; border-radius: 8px; padding: 10px; font: 0.8rem/1.45 ui-monospace, monospace; }
+  .chat-history { margin: 0 0 10px; max-height: 280px; min-height: 70px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #14181d; border-radius: 8px; padding: 10px; font: 0.85rem/1.5 ui-monospace, monospace; }
   textarea { width: 100%; min-height: 90px; resize: vertical; padding: 10px; font: 16px/1.4 ui-monospace, monospace; background: #14181d; color: #e6e6e6; border: 1px solid #2d333b; border-radius: 8px; }
   @media (max-width: 420px) { .crafty-actions { grid-template-columns: 1fr; } .topbar { align-items: flex-start; } }
 </style>
@@ -103,6 +104,24 @@ function formatHostiles (hostiles) {
   return hostiles.map(h => `${h.name} (${h.distance}m)`).join(', ')
 }
 
+function formatNavigation (navigation) {
+  if (!navigation) return 'idle'
+  const target = navigation.target ? ' (' + formatPosition(navigation.target) + ')' : ''
+  const error = navigation.error ? ': ' + navigation.error : ''
+  return navigation.state + target + error
+}
+
+function recentChat (service) {
+  return (service.messages || []).slice(-50).map(entry => ({
+    at: String(entry.at || '').slice(0, 40),
+    message: String(entry.message || '').slice(0, 512)
+  }))
+}
+
+function formatChat (messages) {
+  return messages.map(entry => '[' + entry.at + '] ' + entry.message).join('\n') || 'No chat received yet.'
+}
+
 function panelPage (service, csrf, flash, craftyEnabled) {
   const s = service.status()
   const field = (id, value) => `<dd id="${id}">${esc(value)}</dd>`
@@ -127,6 +146,7 @@ ${flash ? `<p class="flash ${flash.ok ? 'ok' : 'err'}">${esc(flash.text)}</p>` :
     <dt>Position</dt>${field('s-position', formatPosition(s.position))}
     <dt>Hostiles</dt>${field('s-hostiles', formatHostiles(s.nearbyHostiles))}
     <dt>Auto-flee</dt>${field('s-flee', s.autoFlee ? 'on' : 'off')}
+    <dt>Navigation</dt>${field('s-navigation', formatNavigation(s.navigation))}
     <dt>Last error</dt>${field('s-error', s.lastError || 'none')}
   </dl>
 </div>
@@ -175,6 +195,9 @@ ${craftyEnabled ? `<details open>
   <summary>Chat</summary>
   <form method="post" action="/panel/chat">
     ${hidden}
+    <p class="muted">Recent incoming chat (last 50 messages). Kept in memory until restart.</p>
+    <pre class="chat-history" id="chat-history" role="log" aria-label="Incoming Minecraft chat">${esc(formatChat(recentChat(service)))}</pre>
+    <p class="muted" id="chat-status" role="status">Updates every five seconds; reload if scripts are disabled.</p>
     <label for="message">Message</label>
     <input type="text" id="message" name="message" maxlength="256" required>
     <p><button type="submit">Send</button></p>
@@ -246,8 +269,30 @@ const appJs = `const craftyEnabled = document.documentElement.dataset.crafty ===
     set('s-hostiles', s.nearbyHostiles && s.nearbyHostiles.length ? s.nearbyHostiles.map(h => h.name + ' (' + h.distance + 'm)').join(', ') : 'none nearby')
     set('s-flee', s.autoFlee ? 'on' : 'off')
     set('s-error', s.lastError || 'none')
+    set('s-navigation', formatNavigation(s.navigation))
+    await tickChat()
     if (craftyEnabled) await tickCraftyStatus()
   } catch (error) { /* keep the last good values on screen */ }
+}
+${formatPosition.toString()}
+${formatNavigation.toString()}
+${formatChat.toString()}
+async function tickChat () {
+  const output = document.getElementById('chat-history')
+  const status = document.getElementById('chat-status')
+  if (!output || !status) return
+  try {
+    const response = await fetch('/panel/chat.json', { credentials: 'same-origin' })
+    if (!response.ok) throw new Error('Chat could not refresh. Reload to sign in if needed.')
+    const result = await response.json()
+    const text = formatChat(result.messages)
+    if (output.textContent !== text) {
+      const atBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 16
+      output.textContent = text
+      if (atBottom) output.scrollTop = output.scrollHeight
+    }
+    status.textContent = 'Chat refreshed. Updates every five seconds.'
+  } catch (error) { status.textContent = error.message || 'Chat could not refresh.' }
 }
 async function tickCraftyStatus () {
   try {
@@ -277,8 +322,11 @@ document.getElementById('crafty-load-logs')?.addEventListener('click', loadCraft
 document.querySelector('form[action="/panel/crafty/command"]')?.addEventListener('submit', event => {
   if (!window.confirm('Send this command to the configured Minecraft server console?')) event.preventDefault()
 })
-if (craftyEnabled) tickCraftyStatus()
-setInterval(tick, 5000)
+async function refresh () {
+  await tick()
+  setTimeout(refresh, 5000)
+}
+refresh()
 `
 
 function panel (service, token, crafty = null) {
@@ -448,7 +496,7 @@ function panel (service, token, crafty = null) {
       case 'goto': {
         const [x, y, z] = [numberField(fields.x, 'x'), numberField(fields.y, 'y'), numberField(fields.z, 'z')]
         service.goto(x, y, z)
-        return `Walking to ${x}, ${y}, ${z}`
+        return `Waypoint requested: ${x}, ${y}, ${z}. See Navigation for progress.`
       }
       case 'gather': {
         const coords = { x: integerField(fields.x, 'x'), y: integerField(fields.y, 'y'), z: integerField(fields.z, 'z') }
@@ -535,6 +583,7 @@ function panel (service, token, crafty = null) {
         res.end(appJs)
         return true
       }
+      if (req.method === 'GET' && path === '/panel/chat.json') return json(res, 200, { messages: recentChat(service) }), true
       if (req.method === 'GET' && path === '/panel/status.json') return json(res, 200, service.status()), true
       if (req.method === 'GET' && path === '/panel/crafty/status.json') {
         if (!crafty) return json(res, 503, { error: 'Crafty integration is not configured' }), true

@@ -148,7 +148,8 @@ class BotService {
     b.stopDigging?.()
     this.lastError = null
     this.navigation = { id, state: 'moving', target: { x, y, z } }
-    const goal = new goals.GoalNear(x, y, z, 1)
+    // A waypoint means standing in that block, not stopping one block away.
+    const goal = new goals.GoalBlock(x, y, z)
     const active = () => this.actionId === id && this.bot === b && this.state === 'online'
     const report = details => {
       if (!active()) return

@@ -194,3 +194,31 @@ test('jump releases automatically after its bounded duration', async () => {
     assert.equal(controls.jump, false)
   })
 })
+
+test('Go To reaches the requested block instead of stopping one block short', async () => {
+  const Vec3 = require('vec3')
+  const { goals } = require('mineflayer-pathfinder')
+  const { service, bot } = onlineService()
+  bot.entity.position = new Vec3(10.5, 63, 10.5)
+  bot.pathfinder.goto = async goal => {
+    assert.ok(goal instanceof goals.GoalBlock)
+    assert.equal(goal.isEnd(new Vec3(12, 63, 10)), false)
+    assert.equal(goal.isEnd(new Vec3(13, 63, 10)), true)
+    bot.entity.position = new Vec3(13.5, 63, 10.5)
+  }
+  service.goto(13, 63, 10.5)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(service.navigation.state, 'arrived')
+})
+
+test('Go To rejects false pathfinder completion and clears movement', async () => {
+  const Vec3 = require('vec3')
+  const { service, bot, goals } = onlineService()
+  bot.entity.position = new Vec3(-10.5, 63, -10.5)
+  bot.pathfinder.goto = async () => {}
+  service.goto(-5.5, 63, -10.5)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(service.navigation.state, 'failed')
+  assert.match(service.lastError, /without reaching the target/)
+  assert.equal(goals.at(-1), null)
+})
